@@ -124,7 +124,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
                     cachedOrderQuantity = q.Value;
             }));
 
-			string riskText = $"Risk: {Core.Globals.FormatCurrency(absRisk / tickSize * (tickSize * pointValue) * cachedOrderQuantity)}";
+			string riskText = $"Risk: {Core.Globals.FormatCurrency(absRisk * pointValue * cachedOrderQuantity)}";
 
 			SimpleFont						wpfFont		= chartControl.Properties.LabelFont ?? new SimpleFont();
 			SharpDX.DirectWrite.TextFormat	textFormat	= wpfFont.ToDirectWriteTextFormat();
