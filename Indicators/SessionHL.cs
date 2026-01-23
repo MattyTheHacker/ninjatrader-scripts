@@ -57,21 +57,16 @@ namespace NinjaTrader.NinjaScript.Indicators
 			{
 				currentHigh = High[0];
 				currentLow = Low[0];
+				
+				RemoveDrawObject("SessionHigh");
+				RemoveDrawObject("SessionLow");
 			}
 
-			if (High[0] > currentHigh)
-			{
-				currentHigh = High[0];
-				
-				Draw.HorizontalLine(this, "Session High", currentHigh, Brushes.Orange, DashStyleHelper.Dash, 2);
-			}
+			currentHigh = Math.Max(currentHigh, High[0]);
+			currentLow = Math.Min(currentLow, Low[0]);
 			
-			if (Low[0] < currentLow)
-			{
-				currentLow = Low[0];
-				
-				Draw.HorizontalLine(this, "Session Low", currentLow, Brushes.Orange, DashStyleHelper.Dash, 2);
-			}
+			Draw.HorizontalLine(this, "SessionHigh", currentHigh, Brushes.Orange);
+			Draw.HorizontalLine(this, "SessionLow", currentLow, Brushes.Orange);
 		}
 		public override string FormatPriceMarker(double price) => Instrument.MasterInstrument.FormatPrice(price);
 	}

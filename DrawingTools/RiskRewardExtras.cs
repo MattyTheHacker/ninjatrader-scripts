@@ -26,6 +26,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 {
 	public class RiskRewardExtras : DrawingTool
 	{
+		public static RiskRewardExtras ActiveInstance { get; private set; }
 
 		private const int cursorSensitivity = 15;
 		private ChartAnchor editingAnchor;
@@ -33,7 +34,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 		private bool needsRatioUpdate = true;
 		private double ratio = 2;
 		private double risk;
-		private double cachedOrderQuantity;
+		public int cachedOrderQuantity = 1;
+		private DateTime lastQtyFetch = DateTime.MinValue;
+		private static readonly TimeSpan QtyReadInterval = TimeSpan.FromSeconds(3);
 		private double reward;
 		private double stopPrice;
 		private double targetPrice;
@@ -52,14 +55,17 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolRiskRewardExtrasDrawTarget", GroupName = "NinjaScriptGeneral", Order = 4)]
 		public bool ShowRiskText { get; set; } = true;
 
+		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolRiskRewardExtrasDrawTarget", GroupName = "NinjaScriptGeneral", Order = 5)]
+		public bool ShowRewardText { get; set; } = true;
+
 		[Browsable(false)]
-		private bool DrawTarget => RiskAnchor is { IsEditing: false} || RewardAnchor is { IsEditing: false};
+		private bool DrawTarget => RiskAnchor is { IsEditing: false } || RewardAnchor is { IsEditing: false };
 
 		public override object Icon => Icons.DrawRiskReward;
 
 		[Range(0, double.MaxValue)]
 		[NinjaScriptProperty]
-		[Display(ResourceType = typeof(Custom.Resource), Name="RiskRewardExtras", GroupName = "NinjaScriptGeneral", Order = 1)]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "RiskRewardExtras", GroupName = "NinjaScriptGeneral", Order = 1)]
 		public double Ratio
 		{
 			get => ratio;
@@ -92,13 +98,33 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolRiskRewardExtrasExtendLinesRight", GroupName = "NinjaScriptLines", Order = 2)]
 		public bool IsExtendedLinesRight { get; set; }
 
-		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolTextAlignment", GroupName="NinjaScriptGeneral", Order = 2)]
+		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolTextAlignment", GroupName = "NinjaScriptGeneral", Order = 2)]
 		public TextLocation TextAlignment { get; set; }
 
 		[Display(ResourceType = typeof(Custom.Resource), Name = "NinjaScriptDrawingToolRulerYValueDisplayUnit", GroupName = "NinjaScriptGeneral", Order = 3)]
 		public ValueUnit DisplayUnit { get; set; }
 
-        public override bool SupportsAlerts => true;
+		public override bool SupportsAlerts => true;
+
+		private double GetCachedOrderQuantity(ChartControl chartControl)
+		{
+			if (DateTime.Now - lastQtyFetch < QtyReadInterval) return cachedOrderQuantity;
+
+			if (!chartControl.Dispatcher.CheckAccess())
+			{
+				chartControl.Dispatcher.BeginInvoke(
+					System.Windows.Threading.DispatcherPriority.Background,
+					new Action(() => GetCachedOrderQuantity(chartControl)));
+				return cachedOrderQuantity;
+			}
+
+			if (Window.GetWindow(chartControl)?
+				.FindFirst("ChartTraderControlQuantitySelector") is QuantityUpDown q)
+				cachedOrderQuantity = q.Value;
+
+			lastQtyFetch = DateTime.Now;
+			return cachedOrderQuantity;
+		}
 
 		private void DrawRiskText(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale)
 		{
@@ -117,30 +143,55 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			double pointValue = AttachedTo.Instrument.MasterInstrument.PointValue;
 			double absRisk = Math.Abs(risk);
 
-			chartControl.Dispatcher.BeginInvoke(new Action(() =>
-			{
-                if (Window.GetWindow(chartControl)?
-                    .FindFirst("ChartTraderControlQuantitySelector") is QuantityUpDown q)
-                    cachedOrderQuantity = q.Value;
-            }));
+			double qty = GetCachedOrderQuantity(chartControl);
 
-			string riskText = $"Risk: {Core.Globals.FormatCurrency(absRisk * pointValue * cachedOrderQuantity)}";
+			string riskText = $"Risk: {Core.Globals.FormatCurrency(absRisk * pointValue * qty)}";
 
-			SimpleFont						wpfFont		= chartControl.Properties.LabelFont ?? new SimpleFont();
-			SharpDX.DirectWrite.TextFormat	textFormat	= wpfFont.ToDirectWriteTextFormat();
-			textFormat.TextAlignment					= SharpDX.DirectWrite.TextAlignment.Leading;
-			textFormat.WordWrapping						= SharpDX.DirectWrite.WordWrapping.NoWrap;
+			SimpleFont wpfFont = chartControl.Properties.LabelFont ?? new SimpleFont();
+			SharpDX.DirectWrite.TextFormat textFormat = wpfFont.ToDirectWriteTextFormat();
+			textFormat.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
+			textFormat.WordWrapping = SharpDX.DirectWrite.WordWrapping.NoWrap;
 			SharpDX.DirectWrite.TextLayout textLayout = new SharpDX.DirectWrite.TextLayout(Core.Globals.DirectWriteFactory, riskText, textFormat, chartPanel.W, textFormat.FontSize);
 
 			RenderTarget.DrawTextLayout(new SharpDX.Vector2((float)midPoint.X, (float)midPoint.Y), textLayout, StopLineStroke.BrushDX, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
 		}
 
+		private void DrawRewardText(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale)
+		{
+			if (!ShowRewardText) return;
+
+			ChartBars chartBars = GetAttachedToChartBars();
+
+			if (chartBars == null) return;
+
+			Point entryPoint = EntryAnchor.GetPoint(chartControl, chartPanel, chartScale);
+			Point rewardPoint = RewardAnchor.GetPoint(chartControl, chartPanel, chartScale);
+
+			Point midPoint = new((entryPoint.X + rewardPoint.X) / 2, (entryPoint.Y + rewardPoint.Y) / 2);
+
+			double tickSize = AttachedTo.Instrument.MasterInstrument.TickSize;
+			double pointValue = AttachedTo.Instrument.MasterInstrument.PointValue;
+			double absReward = Math.Abs(reward);
+
+			double qty = GetCachedOrderQuantity(chartControl);
+
+			string rewardText = $"Reward: {Core.Globals.FormatCurrency(absReward * pointValue * qty)}";
+
+			SimpleFont wpfFont = chartControl.Properties.LabelFont ?? new SimpleFont();
+			SharpDX.DirectWrite.TextFormat textFormat = wpfFont.ToDirectWriteTextFormat();
+			textFormat.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
+			textFormat.WordWrapping = SharpDX.DirectWrite.WordWrapping.NoWrap;
+			SharpDX.DirectWrite.TextLayout textLayout = new SharpDX.DirectWrite.TextLayout(Core.Globals.DirectWriteFactory, rewardText, textFormat, chartPanel.W, textFormat.FontSize);
+
+			RenderTarget.DrawTextLayout(new SharpDX.Vector2((float)midPoint.X, (float)midPoint.Y), textLayout, TargetLineStroke.BrushDX, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+		}
+
 		private string GetPriceString(double price, ChartBars chartBars)
 		{
 			string priceString;
-			double yValueEntry	= AttachedTo.Instrument.MasterInstrument.RoundToTickSize(EntryAnchor.Price);
-			double tickSize		= AttachedTo.Instrument.MasterInstrument.TickSize;
-			double pointValue	= AttachedTo.Instrument.MasterInstrument.PointValue;
+			double yValueEntry = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(EntryAnchor.Price);
+			double tickSize = AttachedTo.Instrument.MasterInstrument.TickSize;
+			double pointValue = AttachedTo.Instrument.MasterInstrument.PointValue;
 
 			switch (DisplayUnit)
 			{
@@ -150,7 +201,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 						priceString = price > yValueEntry ?
 							Core.Globals.FormatCurrency(AttachedTo.Instrument.MasterInstrument.RoundToTickSize(price - yValueEntry) / tickSize * (tickSize * pointValue * Account.All[0].ForexLotSize)) :
 							Core.Globals.FormatCurrency(AttachedTo.Instrument.MasterInstrument.RoundToTickSize(yValueEntry - price) / tickSize * (tickSize * pointValue * Account.All[0].ForexLotSize));
-					} else {
+					}
+					else
+					{
 						priceString = price > yValueEntry ?
 							Core.Globals.FormatCurrency(AttachedTo.Instrument.MasterInstrument.RoundToTickSize(price - yValueEntry) / tickSize * (tickSize * pointValue)) :
 							Core.Globals.FormatCurrency(AttachedTo.Instrument.MasterInstrument.RoundToTickSize(yValueEntry - price) / tickSize * (tickSize * pointValue));
@@ -200,49 +253,49 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			else if (anchor == EntryAnchor) colour = EntryLineStroke;
 			else colour = AnchorLineStroke;
 
-			SimpleFont						wpfFont		= chartControl.Properties.LabelFont ?? new SimpleFont();
-			SharpDX.DirectWrite.TextFormat	textFormat	= wpfFont.ToDirectWriteTextFormat();
-			textFormat.TextAlignment					= SharpDX.DirectWrite.TextAlignment.Leading;
-			textFormat.WordWrapping						= SharpDX.DirectWrite.WordWrapping.NoWrap;
-			SharpDX.DirectWrite.TextLayout textLayout   = new SharpDX.DirectWrite.TextLayout(Core.Globals.DirectWriteFactory, priceString, textFormat, chartPanel.H, textFormat.FontSize);
+			SimpleFont wpfFont = chartControl.Properties.LabelFont ?? new SimpleFont();
+			SharpDX.DirectWrite.TextFormat textFormat = wpfFont.ToDirectWriteTextFormat();
+			textFormat.TextAlignment = SharpDX.DirectWrite.TextAlignment.Leading;
+			textFormat.WordWrapping = SharpDX.DirectWrite.WordWrapping.NoWrap;
+			SharpDX.DirectWrite.TextLayout textLayout = new SharpDX.DirectWrite.TextLayout(Core.Globals.DirectWriteFactory, priceString, textFormat, chartPanel.H, textFormat.FontSize);
 
 			if (RiskAnchor.Time <= EntryAnchor.Time)
 			{
-				if(!IsExtendedLinesLeft && !IsExtendedLinesRight)
+				if (!IsExtendedLinesLeft && !IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textLeftPoint,
-						TextLocation.InsideRight	=> textRightPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> textLeftPoint,
-						TextLocation.ExtremeRight	=> textRightPoint - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textLeftPoint,
+						TextLocation.InsideRight => textRightPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => textLeftPoint,
+						TextLocation.ExtremeRight => textRightPoint - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				else if (IsExtendedLinesLeft && !IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textLeftPoint,
-						TextLocation.InsideRight	=> textRightPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> chartPanel.X,
-						TextLocation.ExtremeRight	=> textRightPoint - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textLeftPoint,
+						TextLocation.InsideRight => textRightPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => chartPanel.X,
+						TextLocation.ExtremeRight => textRightPoint - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				else if (!IsExtendedLinesLeft && IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textLeftPoint,
-						TextLocation.InsideRight	=> textRightPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> textLeftPoint,
-						TextLocation.ExtremeRight	=> chartPanel.W - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textLeftPoint,
+						TextLocation.InsideRight => textRightPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => textLeftPoint,
+						TextLocation.ExtremeRight => chartPanel.W - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				else if (IsExtendedLinesLeft && IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textLeftPoint,
-						TextLocation.InsideRight	=> textRightPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeRight	=> chartPanel.W - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> chartPanel.X,
-						_							=> point.X
+						TextLocation.InsideLeft => textLeftPoint,
+						TextLocation.InsideRight => textRightPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeRight => chartPanel.W - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => chartPanel.X,
+						_ => point.X
 					};
 			}
 			else if (RiskAnchor.Time >= EntryAnchor.Time)
@@ -250,39 +303,39 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 				{
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textRightPoint,
-						TextLocation.InsideRight	=> textLeftPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> textRightPoint,
-						TextLocation.ExtremeRight	=> textLeftPoint - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textRightPoint,
+						TextLocation.InsideRight => textLeftPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => textRightPoint,
+						TextLocation.ExtremeRight => textLeftPoint - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				}
 				else if (IsExtendedLinesLeft && !IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textRightPoint,
-						TextLocation.InsideRight	=> textLeftPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> chartPanel.X,
-						TextLocation.ExtremeRight	=> textLeftPoint - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textRightPoint,
+						TextLocation.InsideRight => textLeftPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => chartPanel.X,
+						TextLocation.ExtremeRight => textLeftPoint - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				else if (!IsExtendedLinesLeft && IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textRightPoint,
-						TextLocation.InsideRight	=> textLeftPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> textRightPoint,
-						TextLocation.ExtremeRight	=> chartPanel.W - textLayout.Metrics.Width,
-						_							=> point.X
+						TextLocation.InsideLeft => textRightPoint,
+						TextLocation.InsideRight => textLeftPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => textRightPoint,
+						TextLocation.ExtremeRight => chartPanel.W - textLayout.Metrics.Width,
+						_ => point.X
 					};
 				else if (IsExtendedLinesLeft && IsExtendedLinesRight)
 					point.X = TextAlignment switch
 					{
-						TextLocation.InsideLeft		=> textRightPoint,
-						TextLocation.InsideRight	=> textLeftPoint - textLayout.Metrics.Width,
-						TextLocation.ExtremeRight	=> chartPanel.W - textLayout.Metrics.Width,
-						TextLocation.ExtremeLeft	=> chartPanel.X,
-						_							=> point.X
+						TextLocation.InsideLeft => textRightPoint,
+						TextLocation.InsideRight => textLeftPoint - textLayout.Metrics.Width,
+						TextLocation.ExtremeRight => chartPanel.W - textLayout.Metrics.Width,
+						TextLocation.ExtremeLeft => chartPanel.X,
+						_ => point.X
 					};
 
 			RenderTarget.DrawTextLayout(
@@ -298,9 +351,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 		public override IEnumerable<AlertConditionItem> GetAlertConditionItems() =>
 			Anchors.Select(anchor => new AlertConditionItem { Name = anchor.DisplayName, ShouldOnlyDisplayName = true, Tag = anchor });
 
-        public override Cursor GetCursor(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, Point point)
-        {
-            switch (DrawingState)
+		public override Cursor GetCursor(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, Point point)
+		{
+			switch (DrawingState)
 			{
 				case DrawingState.Building: return Cursors.Pen;
 				case DrawingState.Moving: return IsLocked ? Cursors.No : Cursors.SizeAll;
@@ -330,7 +383,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 						cursorSensitivity
 					) ? IsLocked ? Cursors.Arrow : Cursors.SizeAll : null;
 			}
-        }
+		}
 
 		public override Point[] GetSelectionPoints(ChartControl chartControl, ChartScale chartScale)
 		{
@@ -344,23 +397,23 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			return [entryPoint, stopPoint, targetPoint];
 		}
 
-        public override bool IsAlertConditionTrue(AlertConditionItem conditionItem, Condition condition, ChartAlertValue[] values, ChartControl chartControl, ChartScale chartScale)
-        {
-            if (conditionItem.Tag is not ChartAnchor chartAnchor) return false;
+		public override bool IsAlertConditionTrue(AlertConditionItem conditionItem, Condition condition, ChartAlertValue[] values, ChartControl chartControl, ChartScale chartScale)
+		{
+			if (conditionItem.Tag is not ChartAnchor chartAnchor) return false;
 
 			ChartPanel chartPanel = chartControl.ChartPanels[PanelIndex];
 			double alertY = chartScale.GetYByValue(chartAnchor.Price);
 			Point entryPoint = EntryAnchor.GetPoint(chartControl, chartPanel, chartScale);
 			Point stopPoint = RiskAnchor.GetPoint(chartControl, chartPanel, chartScale);
 			Point targetPoint = RewardAnchor.GetPoint(chartControl, chartPanel, chartScale);
-			double anchorMinX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Min() : new[] {entryPoint.X, stopPoint.X}.Min();
-			double anchorMaxX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Max() : new[] {entryPoint.X, stopPoint.X}.Max();
+			double anchorMinX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Min() : new[] { entryPoint.X, stopPoint.X }.Min();
+			double anchorMaxX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Max() : new[] { entryPoint.X, stopPoint.X }.Max();
 			double lineStartX = IsExtendedLinesLeft ? chartPanel.X : anchorMinX;
 			double lineEndX = IsExtendedLinesRight ? chartPanel.X + chartPanel.W : anchorMaxX;
 
 			double firstBarX = chartControl.GetXByTime(values[0].Time);
 			double firstBarY = chartScale.GetYByValue(values[0].Value);
-			
+
 			if (lineEndX < firstBarX) return false;
 
 			Point lineStartPoint = new Point(lineStartX, alertY);
@@ -389,18 +442,18 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
 						MathHelper.PointLineLocation ptLocation = MathHelper.GetPointLineLocation(lineStartPoint, lineEndPoint, stepBarPoint);
 
-						if (condition == Condition.CrossAbove) 
+						if (condition == Condition.CrossAbove)
 							return ptLocation == MathHelper.PointLineLocation.LeftOrAbove;
-						
+
 						return ptLocation == MathHelper.PointLineLocation.RightOrBelow;
 					}
 
 					return MathHelper.DidPredicateCross(values, Predicate);
 			}
 			return false;
-        }
+		}
 
-        public override bool IsVisibleOnChart(ChartControl chartControl, ChartScale chartScale, DateTime firstTimeOnChart, DateTime lastTimeOnChart)
+		public override bool IsVisibleOnChart(ChartControl chartControl, ChartScale chartScale, DateTime firstTimeOnChart, DateTime lastTimeOnChart)
 			=> DrawingState == DrawingState.Building || Anchors.Any(a => a.Time >= firstTimeOnChart && a.Time <= lastTimeOnChart);
 
 		public override void OnCalculateMinMax()
@@ -414,7 +467,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 				foreach (ChartAnchor anchor in Anchors)
 				{
 					if (anchor.DisplayName == RewardAnchor.DisplayName && !DrawTarget) continue;
-					
+
 					MinValue = Math.Min(MinValue, anchor.Price);
 					MaxValue = Math.Max(MaxValue, anchor.Price);
 				}
@@ -458,27 +511,27 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 
 		public override void OnMouseDown(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
 		{
-			switch(DrawingState)
+			switch (DrawingState)
 			{
 				case DrawingState.Building:
 					if (EntryAnchor.IsEditing)
 					{
 						dataPoint.CopyDataValues(EntryAnchor);
 						dataPoint.CopyDataValues(RiskAnchor);
-						EntryAnchor.IsEditing	= false;
-						entryPrice				= AttachedTo.Instrument.MasterInstrument.RoundToTickSize(EntryAnchor.Price);
+						EntryAnchor.IsEditing = false;
+						entryPrice = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(EntryAnchor.Price);
 					}
 					else if (RiskAnchor.IsEditing)
 					{
 						dataPoint.CopyDataValues(RiskAnchor);
-						RiskAnchor.IsEditing	= false;
-						stopPrice				= AttachedTo.Instrument.MasterInstrument.RoundToTickSize(RiskAnchor.Price);
+						RiskAnchor.IsEditing = false;
+						stopPrice = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(RiskAnchor.Price);
 
 						SetReward();
 
-						RewardAnchor.Time		= EntryAnchor.Time;
-						RewardAnchor.SlotIndex	= EntryAnchor.SlotIndex;
-						RewardAnchor.IsEditing	= false;
+						RewardAnchor.Time = EntryAnchor.Time;
+						RewardAnchor.SlotIndex = EntryAnchor.SlotIndex;
+						RewardAnchor.IsEditing = false;
 					}
 					if (!EntryAnchor.IsEditing && !RiskAnchor.IsEditing && !RewardAnchor.IsEditing)
 					{
@@ -504,9 +557,9 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			}
 		}
 
-        public override void OnMouseMove(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
-        {
-            if (IsLocked && DrawingState != DrawingState.Building || !IsVisible) return;
+		public override void OnMouseMove(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
+		{
+			if (IsLocked && DrawingState != DrawingState.Building || !IsVisible) return;
 
 			if (DrawingState == DrawingState.Building)
 			{
@@ -516,7 +569,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 					dataPoint.CopyDataValues(RiskAnchor);
 				else if (RewardAnchor.IsEditing)
 					dataPoint.CopyDataValues(RewardAnchor);
-			} 
+			}
 			else if (DrawingState == DrawingState.Editing && editingAnchor != null)
 			{
 				dataPoint.CopyDataValues(editingAnchor);
@@ -531,17 +584,17 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			else if (DrawingState == DrawingState.Moving)
 				foreach (ChartAnchor anchor in Anchors)
 					anchor.MoveAnchor(InitialMouseDownAnchor, dataPoint, chartControl, chartPanel, chartScale, this);
-			
+
 			entryPrice = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(EntryAnchor.Price);
 			stopPrice = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(RiskAnchor.Price);
 			targetPrice = AttachedTo.Instrument.MasterInstrument.RoundToTickSize(RewardAnchor.Price);
-        }
+		}
 
-        public override void OnMouseUp(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
+		public override void OnMouseUp(ChartControl chartControl, ChartPanel chartPanel, ChartScale chartScale, ChartAnchor dataPoint)
 		{
 			if (DrawingState == DrawingState.Building) return;
 
-			if (DrawingState == DrawingState.Editing || DrawingState == DrawingState.Moving) 
+			if (DrawingState == DrawingState.Editing || DrawingState == DrawingState.Moving)
 				DrawingState = DrawingState.Normal;
 
 			if (editingAnchor != null)
@@ -557,8 +610,10 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			editingAnchor = null;
 		}
 
-        public override void OnRender(ChartControl chartControl, ChartScale chartScale)
+		public override void OnRender(ChartControl chartControl, ChartScale chartScale)
 		{
+			ActiveInstance = this;
+
 			if (!IsVisible) return;
 			if (Anchors.All(a => a.IsEditing)) return;
 			if (needsRatioUpdate && DrawTarget) SetReward();
@@ -571,12 +626,13 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			AnchorLineStroke.RenderTarget = RenderTarget;
 			StopLineStroke.RenderTarget = RenderTarget;
 			EntryLineStroke.RenderTarget = RenderTarget;
+			TargetLineStroke.RenderTarget = RenderTarget;
 
 			RenderTarget.AntialiasMode = SharpDX.Direct2D1.AntialiasMode.PerPrimitive;
 			RenderTarget.DrawLine(entryPoint.ToVector2(), stopPoint.ToVector2(), AnchorLineStroke.BrushDX, AnchorLineStroke.Width, AnchorLineStroke.StrokeStyle);
 
-			double anchorMinX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Min() : new[] {entryPoint.X, stopPoint.X}.Min();
-			double anchorMaxX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Max() : new[] {entryPoint.X, stopPoint.X}.Max();
+			double anchorMinX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Min() : new[] { entryPoint.X, stopPoint.X }.Min();
+			double anchorMaxX = DrawTarget ? new[] { entryPoint.X, stopPoint.X, targetPoint.X }.Max() : new[] { entryPoint.X, stopPoint.X }.Max();
 			double lineStartX = IsExtendedLinesLeft ? chartPanel.X : anchorMinX;
 			double lineEndX = IsExtendedLinesRight ? chartPanel.X + chartPanel.W : anchorMaxX;
 
@@ -610,6 +666,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			DrawPriceText(RiskAnchor, stopPoint, stopPrice, chartControl, chartPanel, chartScale);
 
 			DrawRiskText(chartControl, chartPanel, chartScale);
+			DrawRewardText(chartControl, chartPanel, chartScale);
 		}
 
 
@@ -617,20 +674,21 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 		{
 			if (State == State.SetDefaults)
 			{
-				Description					= @"Custom Risk vs Reward tool which will also auto calculate and display the risk, and recommended max contracts based on acceptable risk. ";
-				Name						= "RiskRewardExtras";
-				Ratio						= 2;
-				ShowRiskText				= true;
-				AnchorLineStroke 			= new Stroke(Brushes.DarkGray,	DashStyleHelper.Solid, 1f, 50);
-				EntryLineStroke 			= new Stroke(Brushes.Goldenrod,	DashStyleHelper.Solid, 2f);
-				StopLineStroke 				= new Stroke(Brushes.Crimson,	DashStyleHelper.Solid, 2f);
-				TargetLineStroke 			= new Stroke(Brushes.SeaGreen,	DashStyleHelper.Solid, 2f);
-				EntryAnchor					= new ChartAnchor { IsEditing = true, DrawingTool = this };
-				RiskAnchor					= new ChartAnchor { IsEditing = true, DrawingTool = this };
-				RewardAnchor				= new ChartAnchor { IsEditing = true, DrawingTool = this };
-				EntryAnchor.DisplayName		= "Entry Point";
-				RiskAnchor.DisplayName		= "Stop Loss";
-				RewardAnchor.DisplayName	= "Take Profit";
+				Description = @"Custom Risk vs Reward tool which will also auto calculate and display the risk, and recommended max contracts based on acceptable risk. ";
+				Name = "RiskRewardExtras";
+				Ratio = 2;
+				ShowRiskText = true;
+				ShowRewardText = true;
+				AnchorLineStroke = new Stroke(Brushes.DarkGray, DashStyleHelper.Solid, 1f, 50);
+				EntryLineStroke = new Stroke(Brushes.Goldenrod, DashStyleHelper.Solid, 2f);
+				StopLineStroke = new Stroke(Brushes.Crimson, DashStyleHelper.Solid, 2f);
+				TargetLineStroke = new Stroke(Brushes.SeaGreen, DashStyleHelper.Solid, 2f);
+				EntryAnchor = new ChartAnchor { IsEditing = true, DrawingTool = this };
+				RiskAnchor = new ChartAnchor { IsEditing = true, DrawingTool = this };
+				RewardAnchor = new ChartAnchor { IsEditing = true, DrawingTool = this };
+				EntryAnchor.DisplayName = "Entry Point";
+				RiskAnchor.DisplayName = "Stop Loss";
+				RewardAnchor.DisplayName = "Take Profit";
 			}
 			else if (State == State.Terminated)
 			{
