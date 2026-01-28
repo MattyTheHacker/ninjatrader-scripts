@@ -31,20 +31,25 @@ namespace NinjaTrader.NinjaScript.Indicators
 			if (State == State.SetDefaults)
 			{
 				Description									= @"Reads any RiskReward drawings on the chart and plots price markers for them. ";
-				Name		    								= "RiskRewardMarkers";
-				Calculate		  							= Calculate.OnEachTick;
-				IsOverlay			   						= true;
-				DisplayInDataBox						= true;
-				DrawOnPricePanel						= true;
-				DrawHorizontalGridLines			= true;
-				DrawVerticalGridLines				= true;
-				PaintPriceMarkers						= true;
-				ScaleJustification					= NinjaTrader.Gui.Chart.ScaleJustification.Right;
-				IsSuspendedWhileInactive		= true;
+				Name										= "RiskRewardMarkers";
+				Calculate									= Calculate.OnEachTick;
+				IsOverlay									= true;
+				DisplayInDataBox							= false;
+				DrawOnPricePanel							= true;
+				DrawHorizontalGridLines						= true;
+				DrawVerticalGridLines						= true;
+				IsChartOnly									= true;
+				PaintPriceMarkers							= true;
+				ScaleJustification							= NinjaTrader.Gui.Chart.ScaleJustification.Right;
+				IsSuspendedWhileInactive					= true;
 
-				AddPlot(Brushes.Goldenrod, "Entry");
-				AddPlot(Brushes.Crimson, "Stop");
-				AddPlot(Brushes.SeaGreen, "Target");
+				AddPlot(new Stroke(Brushes.Goldenrod, 1), PlotStyle.Hash, "Entry");
+				AddPlot(new Stroke(Brushes.Crimson, 1), PlotStyle.Hash, "Stop");
+				AddPlot(new Stroke(Brushes.SeaGreen, 1), PlotStyle.Hash, "Target");
+				
+				Plots[0].Width = 1;
+				Plots[1].Width = 1;
+				Plots[2].Width = 1;
 			}
 		}
 
