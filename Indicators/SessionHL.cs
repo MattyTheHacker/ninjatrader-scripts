@@ -39,6 +39,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				DrawOnPricePanel			= true;
 				IsOverlay					= true;
 				IsSuspendedWhileInactive	= true;
+				PaintPriceMarkers			= true;
 				BarsRequiredToPlot			= 0;
 
 			}
@@ -53,7 +54,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		{
 			if (!Bars.BarsType.IsIntraday) return;
 
-			if (Bars.IsFirstBarOfSession) 
+			if (Bars.IsFirstBarOfSession)
 			{
 				currentHigh = High[0];
 				currentLow = Low[0];

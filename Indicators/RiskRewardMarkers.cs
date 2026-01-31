@@ -40,7 +40,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 				DrawVerticalGridLines						= true;
 				IsChartOnly									= true;
 				PaintPriceMarkers							= true;
-				ScaleJustification							= NinjaTrader.Gui.Chart.ScaleJustification.Right;
+				ScaleJustification							= ScaleJustification.Right;
 				IsSuspendedWhileInactive					= true;
 
 				AddPlot(new Stroke(Brushes.Goldenrod, 1), PlotStyle.Hash, "Entry");

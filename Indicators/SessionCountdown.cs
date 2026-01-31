@@ -30,6 +30,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 		private bool connected, hasRealTimeData;
 		private SessionIterator sessionIterator;
 		private System.Windows.Threading.DispatcherTimer timer;
+		private string lastPrintedPrice = string.Empty;
 
 		private SessionIterator SessionIterator => sessionIterator ??= new SessionIterator(Bars);
 
@@ -50,12 +51,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 		private void OnTimerTick(object sender, EventArgs eventArgs)
 		{
-			ForceRefresh();
-
 			if (DisplayTime())
 			{
-				if (timer is { IsEnabled: false }) timer.IsEnabled = true;
-
 				if (!connected)
 				{
 					Draw.TextFixedFine(
@@ -70,8 +67,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 						0
 					);
 
-					if (timer != null)
-						timer.IsEnabled = false;
+					if (timer != null) timer.IsEnabled = false;
 
 					return;
 				}
@@ -83,19 +79,18 @@ namespace NinjaTrader.NinjaScript.Indicators
 				DateTime targetTime = inSession ? SessionIterator.ActualSessionEnd : SessionIterator.ActualSessionBegin;
 				TimeSpan remainingTime = targetTime - Now;
 
-				string prefix = inSession ? "Time to session close: " : "Time to session open: ";
+				string prefix = inSession ? "Time to session close" : "Time to session open";
 
 				string remainingTimeString = remainingTime.Ticks < 0
-					? "00:00:00:00"
-					: remainingTime.Days.ToString("00") + ":" + 
-					  remainingTime.Hours.ToString("00") + ":" +
-					  remainingTime.Minutes.ToString("00") + ":" +
-					  remainingTime.Seconds.ToString("00");
+					? "00:00:00"
+					: remainingTime.ToString(@"hh\:mm\:ss");
+
+				string drawTextString = remainingTime.Days > 0 ? prefix + " exceeds 1 day" : prefix + ": " + remainingTimeString;
 
 				Draw.TextFixedFine(
 					this,
 					"SessionTimerInfo",
-					prefix + remainingTimeString,
+					drawTextString,
 					TextPositionFine,
 					ChartControl.Properties.ChartText,
 					ChartControl.Properties.LabelFont,
@@ -103,13 +98,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 					Brushes.Transparent,
 					0
 				);
+
+				lastPrintedPrice = drawTextString;
 			}
 		}
-
-		#region Properties
-		[Display(ResourceType = typeof(Custom.Resource), Name = "GuiPropertyNameTextPosition", GroupName = "PropertyCategoryVisual", Order = 70)]
-		public TextPositionFine TextPositionFine { get; set; }
-		#endregion
 
 		protected override void OnStateChange()
 		{
@@ -194,6 +186,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 				connected = false;
 			}
 		}
+
+		#region Properties
+		[Display(ResourceType = typeof(Custom.Resource), Name = "GuiPropertyNameTextPosition", GroupName = "PropertyCategoryVisual", Order = 70)]
+		public TextPositionFine TextPositionFine { get; set; }
+		#endregion
 	}
 }
 

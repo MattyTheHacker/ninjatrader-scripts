@@ -676,7 +676,7 @@ namespace NinjaTrader.NinjaScript.DrawingTools
 			{
 				Description = @"Custom Risk vs Reward tool which will also auto calculate and display the risk, and recommended max contracts based on acceptable risk. ";
 				Name = "RiskRewardExtras";
-				Ratio = 2;
+				Ratio = 1;
 				ShowRiskText = true;
 				ShowRewardText = true;
 				AnchorLineStroke = new Stroke(Brushes.DarkGray, DashStyleHelper.Solid, 1f, 50);
