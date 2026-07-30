@@ -34,6 +34,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
 		private SessionIterator SessionIterator => sessionIterator ??= new SessionIterator(Bars);
 
+		private DateTime lastTickTime = DateTime.MinValue;
 		private DateTime Now
 		{
 			get
@@ -67,8 +68,10 @@ namespace NinjaTrader.NinjaScript.Indicators
 						0
 					);
 
-					ChartControl.InvalidateVisual();
-
+					if ((DateTime.UtcNow - lastTickTime).TotalMilliseconds >= 2000) {
+						ChartControl.InvalidateVisual();
+						lastTickTime = DateTime.UtcNow;
+					}
 					return;
 				}
 
@@ -99,8 +102,11 @@ namespace NinjaTrader.NinjaScript.Indicators
 				);
 
 				lastPrintedPrice = drawTextString;
-
-				ChartControl.InvalidateVisual();
+				
+				if ((DateTime.UtcNow - lastTickTime).TotalMilliseconds >= 2000) {
+					ChartControl.InvalidateVisual();
+					lastTickTime = DateTime.UtcNow;
+				}
 			}
 		}
 
@@ -118,8 +124,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 				DrawHorizontalGridLines						= true;
 				DrawVerticalGridLines						= true;
 				PaintPriceMarkers							= false;
-				ScaleJustification							= NinjaTrader.Gui.Chart.ScaleJustification.Left;
+				ScaleJustification							= NinjaTrader.Gui.Chart.ScaleJustification.Right;
 				IsSuspendedWhileInactive					= true;
+				IsAutoScale                                 = false;
 			}
 			else if (State == State.Terminated)
 			{
@@ -137,6 +144,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			{
 				hasRealTimeData = true;
 				connected = true;
+				lastTickTime = DateTime.UtcNow;
 
 				if (DisplayTime() && timer == null)
 				{
