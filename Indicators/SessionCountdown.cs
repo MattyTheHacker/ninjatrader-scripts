@@ -47,7 +47,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			}
 		}
 
-		private bool DisplayTime() => ChartControl != null && Bars?.Instrument.MarketData != null && IsVisible;
+		private bool DisplayTime() => ChartControl != null && Bars != null && IsVisible;
 
 		private void OnTimerTick(object sender, EventArgs eventArgs)
 		{
@@ -67,13 +67,12 @@ namespace NinjaTrader.NinjaScript.Indicators
 						0
 					);
 
-					if (timer != null) timer.IsEnabled = false;
+					ChartControl.InvalidateVisual();
 
 					return;
 				}
 
 				bool inSession = SessionIterator.IsInSession(Now, false, true);
-
 				SessionIterator.GetNextSession(Now, inSession);
 
 				DateTime targetTime = inSession ? SessionIterator.ActualSessionEnd : SessionIterator.ActualSessionBegin;
@@ -100,6 +99,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 				);
 
 				lastPrintedPrice = drawTextString;
+
+				ChartControl.InvalidateVisual();
 			}
 		}
 
@@ -120,30 +121,6 @@ namespace NinjaTrader.NinjaScript.Indicators
 				ScaleJustification							= NinjaTrader.Gui.Chart.ScaleJustification.Left;
 				IsSuspendedWhileInactive					= true;
 			}
-
-			else if (State == State.Realtime)
-			{
-				if (timer == null && IsVisible)
-				{
-					lock (Connection.Connections)
-					{
-						if (Connection.Connections.ToList()
-							.FirstOrDefault(c => c.Status == ConnectionStatus.Connected &&
-								c.InstrumentTypes.Contains(Instrument.MasterInstrument.InstrumentType)) == null)
-						{
-							Draw.TextFixedFine(this, "SessionTimerInfo",
-								"Disconnected",
-								TextPositionFine,
-								ChartControl.Properties.ChartText,
-								ChartControl.Properties.LabelFont,
-								Brushes.Transparent,
-								Brushes.Transparent,
-								0);
-						}
-					}
-				}
-			}
-
 			else if (State == State.Terminated)
 			{
 				if (timer != null)
@@ -160,14 +137,27 @@ namespace NinjaTrader.NinjaScript.Indicators
 			{
 				hasRealTimeData = true;
 				connected = true;
+
+				if (DisplayTime() && timer == null)
+				{
+					ChartControl.Dispatcher.InvokeAsync(() =>
+					{
+						if (timer == null)
+						{
+							timer = new System.Windows.Threading.DispatcherTimer { Interval = new TimeSpan(0, 0, 1), IsEnabled = true };
+							timer.Tick += OnTimerTick;
+						}
+					});
+				}
 			}
 		}
 
-        protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs connectionStatusUpdate)
+		protected override void OnConnectionStatusUpdate(ConnectionStatusEventArgs connectionStatusUpdate)
 		{
 			if (
 				connectionStatusUpdate.PriceStatus == ConnectionStatus.Connected
 				&& connectionStatusUpdate.Connection.InstrumentTypes.Contains(Instrument.MasterInstrument.InstrumentType)
+				&& Bars != null 
 				&& Bars.BarsType.IsIntraday
 			)
 			{
@@ -177,11 +167,15 @@ namespace NinjaTrader.NinjaScript.Indicators
 				{
 					ChartControl.Dispatcher.InvokeAsync(() =>
 					{
-						timer = new System.Windows.Threading.DispatcherTimer { Interval = new TimeSpan(0,0,1), IsEnabled = true };
-						timer.Tick += OnTimerTick;
+						if (timer == null)
+						{
+							timer = new System.Windows.Threading.DispatcherTimer { Interval = new TimeSpan(0,0,1), IsEnabled = true };
+							timer.Tick += OnTimerTick;
+						}
 					});
 				}
-			} else if (connectionStatusUpdate.PriceStatus == ConnectionStatus.Disconnected)
+			} 
+			else if (connectionStatusUpdate.PriceStatus == ConnectionStatus.Disconnected)
 			{
 				connected = false;
 			}
