@@ -32,6 +32,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private SMA slowSMA;
 		private SMA fastSMA;
 		private OrderFlowVWAP vwap;
+		private int orderQuantity;
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -60,6 +61,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				EmaPeriod = 21;
 				SlowSMAPeriod = 175;
 				FastSMAPeriod = 60;
+				OrderQuantity = 4;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -67,6 +69,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				slowSMA = SMA(SlowSMAPeriod);
 				fastSMA = SMA(FastSMAPeriod);
 				vwap = OrderFlowVWAP(VWAPResolution.Standard, Bars.TradingHours, VWAPStandardDeviations.Three, 1.0, 2.0, 3.0);
+				orderQuantity = OrderQuantity;
 			}
 		}
 
@@ -104,6 +107,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (!isInvertedHammer) return;
 
+			int baseQuantity = orderQuantity / 4;
+			int remainder = orderQuantity % 4;
+
 			double sLPrice = High[0] + (TickSize * 2);
 			double entryPrice = Low[0];
 			double risk = sLPrice - entryPrice;
@@ -118,10 +124,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			SetProfitTarget("S2", CalculationMode.Price, entryPrice - (risk * 1.5));
 			SetProfitTarget("S3", CalculationMode.Price, entryPrice - (risk * 2));
 
-			EnterShortStopMarket(entryPrice, "S1");
-			EnterShortStopMarket(entryPrice, "S2");
-			EnterShortStopMarket(entryPrice, "S3");
-			EnterShortStopMarket(entryPrice, "S4");
+			EnterShortStopMarket(baseQuantity, entryPrice, "S1");
+			EnterShortStopMarket(baseQuantity, entryPrice, "S2");
+			EnterShortStopMarket(baseQuantity, entryPrice, "S3");
+			EnterShortStopMarket(baseQuantity + remainder, entryPrice, "S4");
 		}
 
 		#region Properties
@@ -140,6 +146,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Range(1, int.MaxValue)]
 		[Display(Name = "FastSMAPeriod", Order = 3, GroupName = "Parameters")]
 		public int FastSMAPeriod { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(4, int.MaxValue)]
+		[Display(Name = "OrderQuantity", Order = 4, GroupName = "Parameters")]
+		public int OrderQuantity { get; set; }
 
 		#endregion
 	}
