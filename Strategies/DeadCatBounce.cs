@@ -33,6 +33,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private SMA fastSMA;
 		private OrderFlowVWAP vwap;
 		private int orderQuantity;
+		private bool useEMA;
+		private bool useSlowSMA;
+		private bool useFastSMA;
+		private bool useVWAP;
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -62,6 +66,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				SlowSMAPeriod = 175;
 				FastSMAPeriod = 60;
 				OrderQuantity = 4;
+				
+				UseEMA = true;
+				UseSlowSMA = true;
+				UseFastSMA = true;
+				UseVWAP = true;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -70,6 +79,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 				fastSMA = SMA(FastSMAPeriod);
 				vwap = OrderFlowVWAP(VWAPResolution.Standard, Bars.TradingHours, VWAPStandardDeviations.Three, 1.0, 2.0, 3.0);
 				orderQuantity = OrderQuantity;
+
+				useEMA = UseEMA;
+				useSlowSMA = UseSlowSMA;
+				useFastSMA = UseFastSMA;
+				useVWAP = UseVWAP;
+
+				if (useEMA) AddChartIndicator(ema);
+				if (useSlowSMA) AddChartIndicator(slowSMA);
+				if (useFastSMA) AddChartIndicator(fastSMA);
+				if (useVWAP) AddChartIndicator(vwap);
 			}
 		}
 
@@ -77,7 +96,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			if (Position.MarketPosition == MarketPosition.Short)
 			{
-				double newStop = High[1];
+				double newStop = High[1] + (TickSize * 2);
 				if (previousStop < newStop) return;
 
 				previousStop = newStop;
@@ -90,7 +109,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 
 			// check we have enough bars, and in a downtrend
-			if (CurrentBar < BarsRequiredToTrade || Close[0] > ema[0] || Close[0] > slowSMA[0] || Close[0] > fastSMA[0] || Close[0] > vwap.VWAP[0]) return;
+			if (CurrentBar < BarsRequiredToTrade) return;
+
+			if (useEMA && Close[0] > ema[0]) return;
+			if (useSlowSMA && Close[0] > slowSMA[0]) return;
+			if (useFastSMA && Close[0] > fastSMA[0]) return;
+			if (useVWAP && Close[0] > vwap.VWAP[0]) return;
 
 			// check that the current candle made a new high
 			if (High[0] <= High[1]) return;
@@ -151,6 +175,22 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Range(4, int.MaxValue)]
 		[Display(Name = "OrderQuantity", Order = 4, GroupName = "Parameters")]
 		public int OrderQuantity { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use EMA", Order = 5, GroupName = "Parameters")]
+		public bool UseEMA { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use Slow SMA", Order = 6, GroupName = "Parameters")]
+		public bool UseSlowSMA { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use Fast SMA", Order = 7, GroupName = "Parameters")]
+		public bool UseFastSMA { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Use VWAP", Order = 8, GroupName = "Parameters")]
+		public bool UseVWAP { get; set; }
 
 		#endregion
 	}
