@@ -37,6 +37,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private bool useSlowSMA;
 		private bool useFastSMA;
 		private bool useVWAP;
+		private bool requirePreviousGreen;
+		private bool requireNewHigh;
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -66,11 +68,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				SlowSMAPeriod = 175;
 				FastSMAPeriod = 60;
 				OrderQuantity = 4;
-				
 				UseEMA = true;
 				UseSlowSMA = true;
 				UseFastSMA = true;
 				UseVWAP = true;
+				RequirePreviousGreen = true;
+				RequireNewHigh = true;
 			}
 			else if (State == State.DataLoaded)
 			{
@@ -84,6 +87,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				useSlowSMA = UseSlowSMA;
 				useFastSMA = UseFastSMA;
 				useVWAP = UseVWAP;
+				requirePreviousGreen = RequirePreviousGreen;
+				requireNewHigh = RequireNewHigh;
 
 				if (useEMA) AddChartIndicator(ema);
 				if (useSlowSMA) AddChartIndicator(slowSMA);
@@ -117,10 +122,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (useVWAP && Close[0] > vwap.VWAP[0]) return;
 
 			// check that the current candle made a new high
-			if (High[0] <= High[1]) return;
+			if (requireNewHigh && High[0] <= High[1]) return;
 
 			// check the previous candle was green
-			if (Close[1] < Open[1]) return;
+			if (requirePreviousGreen && Close[1] < Open[1]) return;
 
 			// check for inverted hammer
 			double bodySize = Math.Abs(Close[0] - Open[0]);
@@ -191,6 +196,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[NinjaScriptProperty]
 		[Display(Name = "Use VWAP", Order = 8, GroupName = "Parameters")]
 		public bool UseVWAP { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Require Previous Green", Order = 9, GroupName = "Parameters")]
+		public bool RequirePreviousGreen { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "Require New High", Order = 10, GroupName = "Parameters")]
+		public bool RequireNewHigh { get; set; }
 
 		#endregion
 	}
