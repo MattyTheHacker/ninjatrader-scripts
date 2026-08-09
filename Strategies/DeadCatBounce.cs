@@ -39,6 +39,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private bool useVWAP;
 		private bool requirePreviousGreen;
 		private bool requireNewHigh;
+		private double tpMultiplier;
+		private int maxRiskPerTrade;
+
 		protected override void OnStateChange()
 		{
 			if (State == State.SetDefaults)
@@ -62,16 +65,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 				BarsRequiredToTrade							= 200;
 				// Disable this property for performance gains in Strategy Analyzer optimizations
 				// See the Help Guide for additional information
-				IsInstantiatedOnEachOptimizationIteration	= true;
+				IsInstantiatedOnEachOptimizationIteration	= false;
 
-				EmaPeriod = 21;
-				SlowSMAPeriod = 175;
-				FastSMAPeriod = 60;
+				EmaPeriod = 11;
+				SlowSMAPeriod = 155;
+				FastSMAPeriod = 80;
 				OrderQuantity = 4;
+				TPMultiplier = 1.0;
+				MaxRiskPerTrade = 250;
 				UseEMA = true;
-				UseSlowSMA = true;
+				UseSlowSMA = false;
 				UseFastSMA = true;
-				UseVWAP = true;
+				UseVWAP = false;
 				RequirePreviousGreen = true;
 				RequireNewHigh = true;
 			}
@@ -82,6 +87,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				fastSMA = SMA(FastSMAPeriod);
 				vwap = OrderFlowVWAP(VWAPResolution.Standard, Bars.TradingHours, VWAPStandardDeviations.Three, 1.0, 2.0, 3.0);
 				orderQuantity = OrderQuantity;
+				tpMultiplier = TPMultiplier;
 
 				useEMA = UseEMA;
 				useSlowSMA = UseSlowSMA;
@@ -89,6 +95,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				useVWAP = UseVWAP;
 				requirePreviousGreen = RequirePreviousGreen;
 				requireNewHigh = RequireNewHigh;
+				maxRiskPerTrade = MaxRiskPerTrade;
 
 				if (useEMA) AddChartIndicator(ema);
 				if (useSlowSMA) AddChartIndicator(slowSMA);
@@ -99,9 +106,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		protected override void OnBarUpdate()
 		{
+			if (CurrentBar < 1) return;
+
 			if (Position.MarketPosition == MarketPosition.Short)
 			{
-				double newStop = High[1] + (TickSize * 2);
+				double newStop = High[0] + (TickSize * 2);
 				if (previousStop < newStop) return;
 
 				previousStop = newStop;
@@ -140,8 +149,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 			int remainder = orderQuantity % 4;
 
 			double sLPrice = High[0] + (TickSize * 2);
-			double entryPrice = Low[0];
+			double entryPrice = Math.Min(Low[0], Close[0] - (TickSize * 2));
 			double risk = sLPrice - entryPrice;
+			
+			if (risk > maxRiskPerTrade * TickSize)
+			{
+				return;
+			}
+
 			previousStop = sLPrice;
 
 			SetStopLoss("S1", CalculationMode.Price, sLPrice, false);
@@ -149,9 +164,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 			SetStopLoss("S3", CalculationMode.Price, sLPrice, false);
 			SetStopLoss("S4", CalculationMode.Price, sLPrice, false);
 
-			SetProfitTarget("S1", CalculationMode.Price, entryPrice - risk);
-			SetProfitTarget("S2", CalculationMode.Price, entryPrice - (risk * 1.5));
-			SetProfitTarget("S3", CalculationMode.Price, entryPrice - (risk * 2));
+			// profit target prices must land on a tick boundary, otherwise the odd
+			// multipliers below produce half-ticks that the broker will reject
+			double tp1 = Instrument.MasterInstrument.RoundToTickSize(entryPrice - (risk * tpMultiplier));
+			double tp2 = Instrument.MasterInstrument.RoundToTickSize(entryPrice - (risk * 1.5 * tpMultiplier));
+			double tp3 = Instrument.MasterInstrument.RoundToTickSize(entryPrice - (risk * 2 * tpMultiplier));
+
+			SetProfitTarget("S1", CalculationMode.Price, tp1);
+			SetProfitTarget("S2", CalculationMode.Price, tp2);
+			SetProfitTarget("S3", CalculationMode.Price, tp3);
 
 			EnterShortStopMarket(baseQuantity, entryPrice, "S1");
 			EnterShortStopMarket(baseQuantity, entryPrice, "S2");
@@ -204,6 +225,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[NinjaScriptProperty]
 		[Display(Name = "Require New High", Order = 10, GroupName = "Parameters")]
 		public bool RequireNewHigh { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, double.MaxValue)]
+		[Display(Name = "TP Multiplier", Order = 11, GroupName = "Parameters")]
+		public double TPMultiplier { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(1, int.MaxValue)]
+		[Display(Name = "Max Risk Per Trade", Order = 12, GroupName = "Parameters")]
+		public int MaxRiskPerTrade { get; set; }
 
 		#endregion
 	}
