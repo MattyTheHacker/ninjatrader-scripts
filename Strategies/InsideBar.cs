@@ -90,7 +90,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			if (CurrentBars[0] <= BarsRequiredToTrade) return;
 
-			if (PositionAccount.MarketPosition != MarketPosition.Flat) return;
+			if (Position.MarketPosition != MarketPosition.Flat) return;
 
 			sessionIterator.GetNextSession(Now, true);
 
