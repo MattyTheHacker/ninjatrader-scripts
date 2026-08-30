@@ -70,6 +70,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				ATRLength = 3;
 				ATRMultiplier = 10.0;
+				TPMultiplier = 1.0;
 				OrderQuantity = 4;
 
 				EmaPeriod = 22;
@@ -127,7 +128,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (marketPosition == MarketPosition.Long)
 			{
 				double stop = Low[1] - ATRMultiplier * atr;
-				double target = price + atr;
+				double target = price + TPMultiplier * atr;
 
 				SetStopLoss("entry", CalculationMode.Price, stop, false);
 				SetProfitTarget("entry", CalculationMode.Price, target);
@@ -136,7 +137,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (marketPosition == MarketPosition.Short)
 			{
 				double stop = High[1] + ATRMultiplier * atr;
-				double target = price - atr;
+				double target = price - TPMultiplier * atr;
 
 				SetStopLoss("entry", CalculationMode.Price, stop, false);
 				SetProfitTarget("entry", CalculationMode.Price, target);
@@ -179,6 +180,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Range(0.1, double.MaxValue)]
 		[Display(Name = "ATR Multiplier", Order = 21, GroupName = "ATR Settings")]
 		public double ATRMultiplier { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0.1, double.MaxValue)]
+		[Display(Name = "TP Multiplier", Order = 22, GroupName = "ATR Settings")]
+		public double TPMultiplier { get; set; }
 
 		#endregion
 	}
