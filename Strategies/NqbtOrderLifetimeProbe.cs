@@ -26,7 +26,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 	/// event stamp, and the order's IsLiveUntilCancelled read back off the order rather than
 	/// assumed from the overload that placed it.
 	///
-	/// Three scenarios, one per run, selected by Scenario:
+	/// Six scenarios, one per run, selected by Scenario:
 	///
 	///   1  Lifetime          One unreachable LUC buy stop. Resubmitted only once the previous
 	///                        one reaches a terminal state, so the pattern of terminations is
@@ -53,6 +53,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 	///                        `deadcat.py` already gates fills behind. At a large HoldBars the
 	///                        position is carried to the close instead, so the bar
 	///                        IsExitOnSessionCloseStrategy flattens on is observed directly.
+	///   6  TwoSided          The two-sided squeeze entry by resubmission (route 3), which
+	///                        scenario 3 did not test because its orders were LUC: a plain
+	///                        three-argument buy stop above the last WindowBars bars' high and a
+	///                        sell stop below their low, both re-issued at the window's current
+	///                        extremes on every flat bar, the way nqbt's squeeze rests one side.
+	///                        A side NinjaTrader ignores leaves SUBMIT rows with no ORDER_UPDATE.
+	///                        SubmitShortFirst swaps which side goes in first when a trial opens,
+	///                        which tells "the second of the pair" from "the short side". If both
+	///                        rest, a bar through both triggers shows what the pair does when
+	///                        both levels trade -- the entry-side ambiguity rule nqbt lacks.
 	///
 	/// **Order callbacks report a bar index one behind the bar being processed.** Measured at
 	/// 535 fills out of 535: the bar an ORDER_UPDATE or EXECUTION row carries never reaches the
@@ -74,6 +84,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const int ScenarioOppositeDirection = 3;
 		private const int ScenarioSessionEdge = 4;
 		private const int ScenarioSessionCross = 5;
+		private const int ScenarioTwoSided = 6;
 
 		private const string EventHeader =
 			"kind;trial;bar;bar_utc;bar_local;is_first_bar_of_session;signal_name;submitted_luc;" +
@@ -107,10 +118,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private StringBuilder barRows;
 		private StringBuilder configRows;
 
-		/// <summary>The order placed by the long-form overload in every scenario.</summary>
+		/// <summary>The buy stop in every scenario.</summary>
 		private Order primary;
 
-		/// <summary>Scenario 2's plain three-argument control, scenario 3's opposite side.</summary>
+		/// <summary>Scenario 2's plain three-argument control, scenario 3's and 6's sell stop.</summary>
 		private Order secondary;
 
 		private int trial;
@@ -162,6 +173,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				MaxTrials = 500;
 				HoldBars = 0;
 				TraceProbeOrders = false;
+				SubmitShortFirst = false;
+				WindowBars = 1;
 			}
 			else if (State == State.Configure)
 			{
@@ -255,6 +268,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 			}
 
+			// A trigger off a part-built window is not a level nqbt would rest at.
+			if (Scenario == ScenarioTwoSided && CurrentBar < WindowBars - 1)
+				return;
+
+			// A plain order lives one bar, so the pair is kept resting by re-issuing it rather
+			// than by waiting for it, and a trial runs until neither side is live.
+			if (Scenario == ScenarioTwoSided && (!IsOrderTerminal(primary) || !IsOrderTerminal(secondary)))
+			{
+				SubmitPair(utc);
+				return;
+			}
+
 			if (!IsOrderTerminal(primary) || !IsOrderTerminal(secondary))
 				return;
 
@@ -329,12 +354,59 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 			}
 
+			if (Scenario == ScenarioTwoSided)
+			{
+				SubmitPair(utc);
+				return;
+			}
+
 			double above = High[0] + offset;
 			double below = Low[0] - offset;
 			RecordSubmit(PrimaryName, true, OrderAction.Buy, above, utc);
 			primary = EnterLongStopMarket(0, true, 1, above, PrimaryName);
 			RecordSubmit(SecondaryName, true, OrderAction.SellShort, below, utc);
 			secondary = EnterShortStopMarket(0, true, 1, below, SecondaryName);
+		}
+
+		/// <summary>Scenario 6's plain pair at the window's extremes, in the order SubmitShortFirst sets.</summary>
+		private void SubmitPair(DateTime utc)
+		{
+			double offset = TriggerOffsetTicks * TickSize;
+			double top = High[0];
+			double bottom = Low[0];
+			for (int ago = 1; ago < WindowBars; ago++)
+			{
+				top = Math.Max(top, High[ago]);
+				bottom = Math.Min(bottom, Low[ago]);
+			}
+
+			if (SubmitShortFirst)
+			{
+				SubmitPlainShort(bottom - offset, utc);
+				SubmitPlainLong(top + offset, utc);
+				return;
+			}
+
+			SubmitPlainLong(top + offset, utc);
+			SubmitPlainShort(bottom - offset, utc);
+		}
+
+		/// <summary>An ignored Enter() returns null -- scenario 3's sell side read "none" on every
+		/// bar -- so a refused re-issue must not drop the reference to an order still resting.</summary>
+		private void SubmitPlainLong(double trigger, DateTime utc)
+		{
+			RecordSubmit(PrimaryName, false, OrderAction.Buy, trigger, utc);
+			Order placed = EnterLongStopMarket(1, trigger, PrimaryName);
+			if (placed != null)
+				primary = placed;
+		}
+
+		private void SubmitPlainShort(double trigger, DateTime utc)
+		{
+			RecordSubmit(SecondaryName, false, OrderAction.SellShort, trigger, utc);
+			Order placed = EnterShortStopMarket(1, trigger, SecondaryName);
+			if (placed != null)
+				secondary = placed;
 		}
 
 		/// <summary>Terminal is enumerated rather than inferred from "not Filled".
@@ -533,8 +605,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 
 			Directory.CreateDirectory(OutputFolder);
+
+			// Only scenario 6's names carry its settings, so a re-run of 1 to 5 lands on the
+			// names the stored runs already have.
+			string twoSided = Scenario == ScenarioTwoSided
+				? string.Format(CultureInfo.InvariantCulture, "_win{0}_{1}first", WindowBars, SubmitShortFirst ? "short" : "long")
+				: string.Empty;
 			string stem = string.Format(CultureInfo.InvariantCulture,
-				"{0}_s{1}_eosc{2}_secs{3}_epd{4}_hold{5}_off{6}_{7:yyyyMMdd}_{8:yyyyMMdd}",
+				"{0}_s{1}_eosc{2}_secs{3}_epd{4}_hold{5}_off{6}{7}_{8:yyyyMMdd}_{9:yyyyMMdd}",
 				Instrument.FullName.Replace(' ', '-'),
 				Scenario,
 				IsExitOnSessionClose ? 1 : 0,
@@ -542,6 +620,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				MaxEntriesPerDirection,
 				HoldBars,
 				TriggerOffsetTicks,
+				twoSided,
 				firstUtc,
 				lastUtc);
 
@@ -565,8 +644,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		#region Properties
 
 		[NinjaScriptProperty]
-		[Range(1, 5)]
-		[Display(Name = "Scenario (1 lifetime, 2 cancel, 3 opposite, 4 session edge, 5 session cross)", Order = 1, GroupName = "Parameters")]
+		[Range(1, 6)]
+		[Display(Name = "Scenario (1 lifetime, 2 cancel, 3 opposite, 4 session edge, 5 session cross, 6 two-sided)", Order = 1, GroupName = "Parameters")]
 		public int Scenario { get; set; }
 
 		[NinjaScriptProperty]
@@ -611,6 +690,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[NinjaScriptProperty]
 		[Display(Name = "TraceProbeOrders", Order = 10, GroupName = "Parameters")]
 		public bool TraceProbeOrders { get; set; }
+
+		[NinjaScriptProperty]
+		[Display(Name = "SubmitShortFirst", Order = 11, GroupName = "Parameters")]
+		public bool SubmitShortFirst { get; set; }
+
+		/// <summary>Capped at the 256 bars MaximumBarsLookBack keeps.</summary>
+		[NinjaScriptProperty]
+		[Range(1, 256)]
+		[Display(Name = "WindowBars", Order = 12, GroupName = "Parameters")]
+		public int WindowBars { get; set; }
 
 		#endregion
 	}
