@@ -32,6 +32,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private SMA smaSlow;
 		private int firstLotQuantity;
 		private int secondLotQuantity;
+		private TimeZoneInfo displayTimeZone;
+		private TimeZoneInfo easternTimeZone;
 
 		protected override void OnStateChange()
 		{
@@ -43,7 +45,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				EntriesPerDirection = 2;
 				EntryHandling = EntryHandling.AllEntries;
 				IsExitOnSessionCloseStrategy = true;
-				ExitOnSessionCloseSeconds = 180;
+				ExitOnSessionCloseSeconds = 30;
 				IsFillLimitOnTouch = true;
 				MaximumBarsLookBack = MaximumBarsLookBack.TwoHundredFiftySix;
 				OrderFillResolution = OrderFillResolution.Standard;
@@ -68,9 +70,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 				SmaFastPeriod = 35;
 				SmaSlowPeriod = 125;
 				ErrorMargin = 0.1;
+
+				EntryWindowStart = 0;
+				EntryWindowEnd = 0;
 			}
 			else if (State == State.DataLoaded)
 			{
+				displayTimeZone = NinjaTrader.Core.Globals.GeneralOptions.TimeZoneInfo;
+				easternTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
 				ema = EMA(EmaPeriod);
 				smaFast = SMA(SmaFastPeriod);
 				smaSlow = SMA(SmaSlowPeriod);
@@ -87,6 +95,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		protected override void OnBarUpdate()
 		{
 			if (CurrentBars[0] <= BarsRequiredToTrade) return;
+			if (!InEntryWindow()) return;
 			if (PositionAccount.MarketPosition != MarketPosition.Flat && !IgnoreAccountPosition) return;
 			if (Position.MarketPosition != MarketPosition.Flat) return;
 
@@ -109,6 +118,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 				EnterShort(0, secondLotQuantity, "entry2");
 				return;
 			}
+		}
+
+		// Eastern, not Bars.TradingHours.TimeZoneInfo, which is CME's own Central zone.
+		// A bar is stamped at its close, so it belongs to the window its body falls in:
+		// the test is exclusive at the start and inclusive at the end. Start == End is off.
+		private bool InEntryWindow()
+		{
+			if (EntryWindowStart == EntryWindowEnd) return true;
+
+			int barTime = ToTime(TimeZoneInfo.ConvertTime(Time[0], displayTimeZone, easternTimeZone));
+
+			if (EntryWindowStart < EntryWindowEnd) return barTime > EntryWindowStart && barTime <= EntryWindowEnd;
+
+			return barTime > EntryWindowStart || barTime <= EntryWindowEnd;
 		}
 
         protected override void OnExecutionUpdate(Execution execution, string executionId, double price, int quantity, MarketPosition marketPosition, string orderId, DateTime time)
@@ -235,6 +258,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 		[Range(0, double.MaxValue)]
 		[Display(Name = "Maximum Loss Per Trade", Order = 25, GroupName = "Parameters")]
 		public double MaximumLossPerTrade { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 235959)]
+		[Display(Name = "Entry Window Start (ET, HHMMSS)", Order = 30, GroupName = "Trading Window")]
+		public int EntryWindowStart { get; set; }
+
+		[NinjaScriptProperty]
+		[Range(0, 235959)]
+		[Display(Name = "Entry Window End (ET, HHMMSS)", Order = 31, GroupName = "Trading Window")]
+		public int EntryWindowEnd { get; set; }
 
 		#endregion
 	}
