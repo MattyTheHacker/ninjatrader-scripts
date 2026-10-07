@@ -106,12 +106,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (Close[0] > (High[2] + (High[2] - Low[2]) * ErrorMargin) && upTrend)
 			{
+				SetBracket(MarketPosition.Long, Close[0]);
 				EnterLong(0, OrderQuantity, "entry"); 
 				return;
 			}
 
 			if (Close[0] < (Low[2] - (High[2] - Low[2]) * ErrorMargin) && downTrend)
 			{
+				SetBracket(MarketPosition.Short, Close[0]);
 				EnterShort(0, OrderQuantity, "entry"); 
 				return;
 			}
@@ -123,21 +125,27 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if (execution.Name != "entry") return;
 
+			SetBracket(marketPosition, price);
+		}
+
+		// Sets the entry's stop and target: from Close[0] before the entry, then from the fill.
+		private void SetBracket(MarketPosition direction, double referencePrice)
+		{
 			double atr = ATR(ATRLength)[0];
 
-			if (marketPosition == MarketPosition.Long)
+			if (direction == MarketPosition.Long)
 			{
 				double stop = Low[1] - ATRMultiplier * atr;
-				double target = price + TPMultiplier * atr;
+				double target = referencePrice + TPMultiplier * atr;
 
 				SetStopLoss("entry", CalculationMode.Price, stop, false);
 				SetProfitTarget("entry", CalculationMode.Price, target);
 			}
 
-			if (marketPosition == MarketPosition.Short)
+			if (direction == MarketPosition.Short)
 			{
 				double stop = High[1] + ATRMultiplier * atr;
-				double target = price - TPMultiplier * atr;
+				double target = referencePrice - TPMultiplier * atr;
 
 				SetStopLoss("entry", CalculationMode.Price, stop, false);
 				SetProfitTarget("entry", CalculationMode.Price, target);
