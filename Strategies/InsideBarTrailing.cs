@@ -107,6 +107,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if ((Close[0] > (High[2] + (High[2] - Low[2]) * ErrorMargin)) && upTrend)
 			{
+				SetBracket(MarketPosition.Long, Close[0]);
 				EnterLong(0, firstLotQuantity, "entry1");
 				EnterLong(0, secondLotQuantity, "entry2");
 				return;
@@ -114,6 +115,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			if ((Close[0] < (Low[2] - (High[2] - Low[2]) * ErrorMargin)) && downTrend)
 			{
+				SetBracket(MarketPosition.Short, Close[0]);
 				EnterShort(0, firstLotQuantity, "entry1");
 				EnterShort(0, secondLotQuantity, "entry2");
 				return;
@@ -139,13 +141,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (marketPosition == MarketPosition.Flat) return;
 			if (execution.Name != "entry1" && execution.Name != "entry2" && execution.Name != "Take profit") return;
 
+			SetBracket(marketPosition, price);
+		}
+
+		// Sets entry1's stop and target and entry2's trail: from Close[0] before the entry, then from the fill.
+		private void SetBracket(MarketPosition direction, double referencePrice)
+		{
 			double atr = ATR(ATRLength)[0];
 			double trailingStopDistance = (High[1] - Low[1]) / TickSize * TrailingStopMultiplier;
 
-			if (marketPosition == MarketPosition.Long)
+			if (direction == MarketPosition.Long)
 			{
 				double stopLossPrice = Low[1] - ATRMultiplier * atr;
-				double targetPrice = price + atr;
+				double targetPrice = referencePrice + atr;
 
 				SetStopLoss("entry1", CalculationMode.Price, stopLossPrice, false);
 				SetTrailStop("entry2", CalculationMode.Ticks, trailingStopDistance, false);
@@ -153,10 +161,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 			}
 
-			if (marketPosition == MarketPosition.Short)
+			if (direction == MarketPosition.Short)
 			{
 				double stopLossPrice = High[1] + ATRMultiplier * atr;
-				double targetPrice = price - atr;
+				double targetPrice = referencePrice - atr;
 
 				SetStopLoss("entry1", CalculationMode.Price, stopLossPrice, false);
 				SetTrailStop("entry2", CalculationMode.Ticks, trailingStopDistance, false);
