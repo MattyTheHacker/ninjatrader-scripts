@@ -13,11 +13,12 @@ using NinjaTrader.NinjaScript;
 namespace NinjaTrader.NinjaScript.Strategies
 {
 	/// <summary>
-	/// Records where NinjaTrader fills a profit target the market has already passed, so nqbt
-	/// issues #452 and #244 can be answered by measurement. Places no stop.
+	/// Records where NinjaTrader fills a limit order the market has already passed -- a profit
+	/// target (nqbt issues #452 and #244) or a limit entry (#454) -- so each can be answered by
+	/// measurement. Places no stop.
 	///
-	/// No reconciled trade list holds such a target, because front-month 1-minute bars rarely
-	/// open past one, so the probe puts the target there on purpose. Two scenarios, one per run,
+	/// No reconciled trade list holds such an order, because front-month 1-minute bars rarely
+	/// open past one, so the probe puts the order there on purpose. Four scenarios, one per run,
 	/// selected by Scenario. Trials alternate long and short.
 	///
 	///   1  EntryBar  (#452) At a flat bar's close, a target PassedOffsetTicks behind that close,
@@ -28,9 +29,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 	///                every bar the position is held, the target moved to GapOffsetTicks beyond
 	///                that close. A bar opening further out than the target has gapped through
 	///                it; a bar opening short of it and trading through is the control.
+	///   3  LimitEntry (#454) At a flat bar's close, a limit entry GapOffsetTicks inside that close
+	///                -- a buy limit below it, a sell limit above -- live for the next bar only. A
+	///                bar opening beyond the limit has gapped through it, and one that only touches
+	///                it says whether an entry limit, like a target, has to trade through.
+	///   4  Marketable (#454) The same entry PassedOffsetTicks on the wrong side of the close -- a
+	///                buy limit above it, a sell limit below -- so it is marketable when sent:
+	///                whether NinjaTrader accepts it, and where it fills.
 	///
 	/// A position still open HoldBars bars after its entry is exited at market, so a target
-	/// NinjaTrader refuses or leaves resting cannot stall the run.
+	/// NinjaTrader refuses or leaves resting cannot stall the run. Scenarios 3 and 4 set no target
+	/// and exit at the entry bar's close, and send each entry only once the last has ended.
 	///
 	/// Order callbacks report a bar one behind the bar they filled on -- NqbtOrderLifetimeProbe
 	/// measured it. tools/reconcile_passed_target.py re-measures it on every run.
@@ -44,6 +53,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private const int ScenarioEntryBar = 1;
 		private const int ScenarioResting = 2;
+		private const int ScenarioLimitEntry = 3;
+		private const int ScenarioMarketable = 4;
 
 		private const string EventHeader =
 			"kind;trial;bar;bar_utc;bar_local;signal_name;from_entry_signal;order_id;order_action;" +
@@ -75,6 +86,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private int trial;
 		private string entryName;
 
+		/// <summary>The trial's entry order until it ends, so the next is not sent over it.</summary>
+		private Order entryOrder;
+
 		/// <summary>+1 for a long trial, -1 for a short one.</summary>
 		private double entrySide;
 
@@ -94,7 +108,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			if (State == State.SetDefaults)
 			{
-				Description									= @"Records where a profit target the market has passed fills -- nqbt issues #452 and #244";
+				Description									= @"Records where a limit order the market has passed fills -- nqbt issues #452, #244 and #454";
 				Name										= "NqbtPassedTargetProbe";
 				Calculate									= Calculate.OnBarClose;
 				EntriesPerDirection							= 1;
@@ -128,6 +142,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// between runs at IsInstantiatedOnEachOptimizationIteration = false.
 				trial = 0;
 				entryName = null;
+				entryOrder = null;
 				entrySide = 0;
 				positionOpenedBar = -1;
 				exitSubmitted = false;
@@ -169,6 +184,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		/// <summary>The bar's decision: leave a position, move its target, or open the next trial.</summary>
 		private void Advance(DateTime utc)
 		{
+			if (entryOrder != null && IsTerminalOrderState(entryOrder.OrderState))
+				entryOrder = null;
+
 			if (Position.MarketPosition != MarketPosition.Flat)
 			{
 				if (positionOpenedBar < 0)
@@ -176,7 +194,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 				// The session-close handler flattens at this bar's close, so an exit sent here would
 				// be left working into the next session.
-				if (CurrentBar - positionOpenedBar >= HoldBars && !Bars.IsLastBarOfSession)
+				if (CurrentBar - positionOpenedBar >= EffectiveHoldBars() && !Bars.IsLastBarOfSession)
 				{
 					ExitPosition(utc);
 					return;
@@ -190,15 +208,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 			positionOpenedBar = -1;
 			exitSubmitted = false;
 
+			// A limit entry is live through the bar after it is sent, and one sent while it still
+			// works would amend it rather than start a trial.
+			if (entryOrder != null)
+				return;
+
 			if (trial >= MaxTrials)
 				return;
 
-			// A market order sent here fills in the next session, so the trial would straddle
-			// the boundary the session-close handler acts on.
+			// An order sent here fills in the next session, so the trial would straddle the
+			// boundary the session-close handler acts on.
 			if (Bars.IsLastBarOfSession)
 				return;
 
 			SubmitTrial(utc);
+		}
+
+		private bool IsLimitEntryScenario()
+		{
+			return Scenario == ScenarioLimitEntry || Scenario == ScenarioMarketable;
+		}
+
+		/// <summary>Bars a position is held before the probe exits it: none in the limit-entry scenarios.</summary>
+		private int EffectiveHoldBars()
+		{
+			return IsLimitEntryScenario() ? 0 : HoldBars;
 		}
 
 		private void SubmitTrial(DateTime utc)
@@ -207,6 +241,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 			bool isLong = trial % 2 == 1;
 			entryName = isLong ? LongName : ShortName;
 			entrySide = isLong ? 1 : -1;
+			OrderAction action = isLong ? OrderAction.Buy : OrderAction.SellShort;
+
+			if (IsLimitEntryScenario())
+			{
+				double limit = Scenario == ScenarioLimitEntry
+					? Close[0] - entrySide * GapOffsetTicks * TickSize
+					: Close[0] + entrySide * PassedOffsetTicks * TickSize;
+				RecordSubmit(entryName, action, OrderType.Limit, limit, utc);
+				Order placed = isLong ? EnterLongLimit(1, limit, entryName) : EnterShortLimit(1, limit, entryName);
+				if (placed != null)
+					entryOrder = placed;
+				return;
+			}
 
 			// The target has to be set before the entry it belongs to is sent, and reset on every
 			// trial, or the previous trial's price is applied to the new position.
@@ -215,11 +262,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 				: Close[0] + entrySide * OutOfReachPoints;
 			SetTarget(target, utc);
 
-			RecordSubmit(entryName, isLong ? OrderAction.Buy : OrderAction.SellShort, utc);
+			RecordSubmit(entryName, action, OrderType.Market, double.NaN, utc);
 			if (isLong)
 				EnterLong(1, entryName);
 			else
 				EnterShort(1, entryName);
+		}
+
+		/// <summary>Terminal is enumerated rather than inferred from "not Filled" -- see
+		/// NqbtOrderLifetimeProbe.</summary>
+		private static bool IsTerminalOrderState(OrderState state)
+		{
+			return state == OrderState.Filled || state == OrderState.Cancelled || state == OrderState.Rejected;
 		}
 
 		private void SetTarget(double price, DateTime utc)
@@ -234,7 +288,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 
 			bool isLong = Position.MarketPosition == MarketPosition.Long;
-			RecordSubmit(ExitName, isLong ? OrderAction.Sell : OrderAction.BuyToCover, utc);
+			RecordSubmit(ExitName, isLong ? OrderAction.Sell : OrderAction.BuyToCover, OrderType.Market, double.NaN, utc);
 			if (isLong)
 				ExitLong(ExitName, entryName);
 			else
@@ -249,6 +303,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (eventRows == null || CurrentBar < 0)
 				return;
 
+			// The Enter methods return the order, but the callback can arrive before that
+			// assignment lands, so the reference is claimed by name here as well.
+			if (order.Name == entryName && entryOrder == null && !IsTerminalOrderState(orderState))
+				entryOrder = order;
+
 			RecordEvent(OrderUpdate, order, double.NaN, time, error, comment);
 		}
 
@@ -261,10 +320,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 			RecordEvent(Execution, execution.Order, price, time, ErrorCode.NoError, executionId);
 		}
 
-		private void RecordSubmit(string signalName, OrderAction action, DateTime utc)
+		/// <summary>One row per order sent. limitPrice is NaN on a market order, which has none.</summary>
+		private void RecordSubmit(string signalName, OrderAction action, OrderType orderType, double limitPrice,
+			DateTime utc)
 		{
 			eventRows.Append(string.Format(CultureInfo.InvariantCulture,
-				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};;{7};Market;;1;;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;;{8}\n",
+				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};;{7};{8};{9};1;;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;;{10}\n",
 				Submit,
 				trial,
 				CurrentBar,
@@ -273,6 +334,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				signalName,
 				signalName == ExitName ? entryName : string.Empty,
 				action,
+				orderType,
+				double.IsNaN(limitPrice) ? string.Empty : limitPrice.ToString("R", CultureInfo.InvariantCulture),
 				Bars.IsLastBarOfSession ? 1 : 0));
 		}
 
@@ -402,13 +465,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			Directory.CreateDirectory(OutputFolder);
 
-			int offsetTicks = Scenario == ScenarioEntryBar ? PassedOffsetTicks : GapOffsetTicks;
+			int offsetTicks = Scenario == ScenarioEntryBar || Scenario == ScenarioMarketable
+				? PassedOffsetTicks
+				: GapOffsetTicks;
 			string stem = string.Format(CultureInfo.InvariantCulture,
 				"{0}_s{1}_off{2}_hold{3}_{4:yyyyMMdd}_{5:yyyyMMdd}",
 				Instrument.FullName.Replace(' ', '-'),
 				Scenario,
 				offsetTicks,
-				HoldBars,
+				EffectiveHoldBars(),
 				firstUtc,
 				lastUtc);
 
@@ -432,8 +497,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		#region Properties
 
 		[NinjaScriptProperty]
-		[Range(1, 2)]
-		[Display(Name = "Scenario (1 entry bar, 2 resting)", Order = 1, GroupName = "Parameters")]
+		[Range(1, 4)]
+		[Display(Name = "Scenario (1 entry bar, 2 resting, 3 limit entry, 4 marketable entry)", Order = 1, GroupName = "Parameters")]
 		public int Scenario { get; set; }
 
 		[NinjaScriptProperty]
