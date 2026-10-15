@@ -1,5 +1,6 @@
 #region Using declarations
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.IO;
@@ -15,11 +16,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 	/// <summary>
 	/// Records where NinjaTrader fills a limit order the market has already passed -- a profit
 	/// target (nqbt issues #452 and #244) or a limit entry (#454) -- and what it does with a stop
-	/// loss that a limit entry's fill has already passed (#455), so each can be answered by
-	/// measurement. Only scenario 5 places a stop.
+	/// loss its entry bar opened past, behind a limit entry or a stop entry (#455), so each can be
+	/// answered by measurement. Only scenarios 5 to 9 place a stop.
 	///
 	/// No reconciled trade list holds such an order, because front-month 1-minute bars rarely
-	/// open past one, so the probe puts the order there on purpose. Five scenarios, one per run,
+	/// open past one, so the probe puts the order there on purpose. Nine scenarios, one per run,
 	/// selected by Scenario. Trials alternate long and short.
 	///
 	///   1  EntryBar  (#452) At a flat bar's close, a target PassedOffsetTicks behind that close,
@@ -45,12 +46,32 @@ namespace NinjaTrader.NinjaScript.Strategies
 	///                it, fills it, or leaves it working, and at what price. A gapped bar that
 	///                trades back to the stop, and one that trades to the limit and on through the
 	///                stop, are the controls.
+	///   6  StopEntry (#455) At a flat bar's close, a stop loss GapOffsetTicks beyond that close --
+	///                a sell stop above it, a buy stop below -- then a stop entry StopOffsetTicks
+	///                beyond the stop, live for the next bar only. A bar that opens on the far side
+	///                of the stop from the entry and then trades through the entry has opened past
+	///                its stop: whether the stop fills at that open or at its own price. A bar
+	///                opening at the stop or beyond it, toward the entry, is the control.
+	///   7  StopEntryTarget (#455) Scenario 6 with a profit target OutOfReachPoints beyond the
+	///                entry as well, so the stop goes out beside a target as DeadCatBounce's and
+	///                PullBackAndGo's do: whether that changes what the stop does on the entry bar.
+	///   8  StopInGapTarget (#455) Scenario 5 with the same out-of-reach target, so the limit
+	///                entry's stop goes out beside a target as OpeningRange's does.
+	///   9  FourStopEntries (#455) Scenario 6 sent as four entries of one contract each, with a
+	///                stop each at the same price, as DeadCatBounce's S1 to S4 and PullBackAndGo's
+	///                L1 to L4 are. The first leg is named as every other scenario's entry is, and
+	///                the others carry its name and their number.
 	///
-	/// A position still open HoldBars bars after its entry is exited at market, so a target
-	/// NinjaTrader refuses or leaves resting cannot stall the run. Scenarios 3, 4 and 5 set no
-	/// target and send each entry only once the last has ended. Scenarios 3 and 4 exit at the
-	/// entry bar's close; scenario 5 at the close of the bar after, so a stop NinjaTrader leaves
-	/// working has that bar to itself.
+	/// A position still open HoldBars bars after its entry is exited at market, one exit for each
+	/// leg still open, so a target NinjaTrader refuses or leaves resting cannot stall the run.
+	/// Scenarios 3 to 6 and 9 set no target, and scenarios 3 to 9 send each entry only once the
+	/// last has ended. Scenarios 3 and 4 exit at the entry bar's close; scenarios 5 to 9 at the
+	/// close of the bar after, so a stop NinjaTrader leaves working has that bar to itself.
+	///
+	/// In scenarios 6, 7 and 9 the trial after one the probe exited at market waits a bar, because
+	/// NinjaTrader left some stop entries sent on the bar that exit filled on working for good.
+	/// Any entry still working past the bar it lives for is recorded as STUCK and cancelled, and
+	/// the next trial starts.
 	///
 	/// Order callbacks report a bar one behind the bar they filled on -- NqbtOrderLifetimeProbe
 	/// measured it. tools/reconcile_passed_target.py re-measures it on every run.
@@ -67,6 +88,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const int ScenarioLimitEntry = 3;
 		private const int ScenarioMarketable = 4;
 		private const int ScenarioStopInGap = 5;
+		private const int ScenarioStopEntry = 6;
+		private const int ScenarioStopEntryTarget = 7;
+		private const int ScenarioStopInGapTarget = 8;
+		private const int ScenarioFourStopEntries = 9;
+
+		/// <summary>Entries a trial sends in scenario 9.</summary>
+		private const int FourLegs = 4;
 
 		private const string EventHeader =
 			"kind;trial;bar;bar_utc;bar_local;signal_name;from_entry_signal;order_id;order_action;" +
@@ -87,6 +115,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const string StopSet = "STOP_SET";
 		private const string OrderUpdate = "ORDER_UPDATE";
 		private const string Execution = "EXECUTION";
+		private const string Stuck = "STUCK";
 
 		private const string LongName = "probeLong";
 		private const string ShortName = "probeShort";
@@ -99,8 +128,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private int trial;
 		private string entryName;
 
-		/// <summary>The trial's entry order until it ends, so the next is not sent over it.</summary>
-		private Order entryOrder;
+		/// <summary>The trial's entry orders until each ends, so the next trial is not sent over
+		/// them. One, except in scenario 9.</summary>
+		private readonly List<Order> entryOrders = new List<Order>();
+
+		/// <summary>The trial's entries holding a position, by name, so the probe's exit names each
+		/// one that is.</summary>
+		private readonly HashSet<string> openLegs = new HashSet<string>();
+
+		/// <summary>Bar the trial's entry was sent on.</summary>
+		private int entrySentBar = -1;
 
 		/// <summary>+1 for a long trial, -1 for a short one.</summary>
 		private double entrySide;
@@ -121,7 +158,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		{
 			if (State == State.SetDefaults)
 			{
-				Description									= @"Records where a limit order the market has passed fills, and what a stop a limit entry's fill has passed does -- nqbt issues #452, #244, #454 and #455";
+				Description									= @"Records where a limit order the market has passed fills, and what a stop its entry bar opened past does -- nqbt issues #452, #244, #454 and #455";
 				Name										= "NqbtPassedTargetProbe";
 				Calculate									= Calculate.OnBarClose;
 				EntriesPerDirection							= 1;
@@ -148,6 +185,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				HoldBars = 30;
 				MaxTrials = 5000;
 			}
+			else if (State == State.Configure)
+			{
+				// AllEntries with four allowed, as both strategies run.
+				if (Scenario == ScenarioFourStopEntries)
+					EntriesPerDirection = FourLegs;
+			}
 			else if (State == State.DataLoaded)
 			{
 				displayZone = NinjaTrader.Core.Globals.GeneralOptions.TimeZoneInfo;
@@ -156,7 +199,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// between runs at IsInstantiatedOnEachOptimizationIteration = false.
 				trial = 0;
 				entryName = null;
-				entryOrder = null;
+				entryOrders.Clear();
+				openLegs.Clear();
+				entrySentBar = -1;
 				entrySide = 0;
 				positionOpenedBar = -1;
 				exitSubmitted = false;
@@ -198,8 +243,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 		/// <summary>The bar's decision: leave a position, move its target, or open the next trial.</summary>
 		private void Advance(DateTime utc)
 		{
-			if (entryOrder != null && IsTerminalOrderState(entryOrder.OrderState))
-				entryOrder = null;
+			entryOrders.RemoveAll(order => IsTerminalOrderState(order.OrderState));
+
+			// An entry lives for the bar after it is sent, but NinjaTrader has left one working
+			// past it, and waiting on that would stall every trial after. The next trial waits a
+			// bar for the cancel, because an opposite entry sent while this one works is ignored.
+			if (entryOrders.Count > 0 && CurrentBar > entrySentBar + 1)
+			{
+				ReleaseStuckEntries();
+				return;
+			}
 
 			if (Position.MarketPosition != MarketPosition.Flat)
 			{
@@ -220,11 +273,19 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 			}
 			positionOpenedBar = -1;
+			// The session-close exit names no entry, so a leg it closed is still listed.
+			openLegs.Clear();
+			bool exitJustFilled = exitSubmitted;
 			exitSubmitted = false;
 
-			// A limit entry is live through the bar after it is sent, and one sent while it still
+			// A stop entry sent on the bar the probe's market exit filled on has been left working
+			// for good, never filled and never cancelled.
+			if (exitJustFilled && IsStopEntryScenario())
+				return;
+
+			// An entry order is live through the bar after it is sent, and one sent while it still
 			// works would amend it rather than start a trial.
-			if (entryOrder != null)
+			if (entryOrders.Count > 0)
 				return;
 
 			if (trial >= MaxTrials)
@@ -240,14 +301,30 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private bool IsLimitEntryScenario()
 		{
-			return Scenario == ScenarioLimitEntry || Scenario == ScenarioMarketable || Scenario == ScenarioStopInGap;
+			return Scenario == ScenarioLimitEntry || Scenario == ScenarioMarketable || IsStopInGapScenario();
 		}
 
-		/// <summary>Bars a position is held before the probe exits it: one in scenario 5, none in the
-		/// other limit-entry scenarios.</summary>
+		private bool IsStopInGapScenario()
+		{
+			return Scenario == ScenarioStopInGap || Scenario == ScenarioStopInGapTarget;
+		}
+
+		private bool IsStopEntryScenario()
+		{
+			return Scenario == ScenarioStopEntry || Scenario == ScenarioStopEntryTarget
+				|| Scenario == ScenarioFourStopEntries;
+		}
+
+		private bool IsStopScenario()
+		{
+			return IsStopInGapScenario() || IsStopEntryScenario();
+		}
+
+		/// <summary>Bars a position is held before the probe exits it: HoldBars in scenarios 1 and 2,
+		/// none in 3 and 4, and one in 5 to 9.</summary>
 		private int EffectiveHoldBars()
 		{
-			if (Scenario == ScenarioStopInGap)
+			if (IsStopScenario())
 				return 1;
 
 			return IsLimitEntryScenario() ? 0 : HoldBars;
@@ -256,10 +333,31 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private void SubmitTrial(DateTime utc)
 		{
 			trial++;
+			entrySentBar = CurrentBar;
 			bool isLong = trial % 2 == 1;
 			entryName = isLong ? LongName : ShortName;
 			entrySide = isLong ? 1 : -1;
 			OrderAction action = isLong ? OrderAction.Buy : OrderAction.SellShort;
+
+			if (IsStopEntryScenario())
+			{
+				double stop = Close[0] + entrySide * GapOffsetTicks * TickSize;
+				double trigger = stop + entrySide * StopOffsetTicks * TickSize;
+				SetStop(stop, utc);
+				if (Scenario == ScenarioStopEntryTarget)
+					SetTarget(trigger + entrySide * OutOfReachPoints, utc);
+
+				for (int leg = 1; leg <= EntryLegs(); leg++)
+				{
+					string legName = LegName(leg);
+					RecordSubmit(legName, string.Empty, action, OrderType.StopMarket, trigger, double.NaN, utc);
+					Order placed = isLong
+						? EnterLongStopMarket(1, trigger, legName)
+						: EnterShortStopMarket(1, trigger, legName);
+					Track(placed);
+				}
+				return;
+			}
 
 			if (IsLimitEntryScenario())
 			{
@@ -268,13 +366,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 					: Close[0] - entrySide * GapOffsetTicks * TickSize;
 
 				// Set before the entry and reset on every trial, as the target is below.
-				if (Scenario == ScenarioStopInGap)
+				if (IsStopInGapScenario())
 					SetStop(limit - entrySide * StopOffsetTicks * TickSize, utc);
+				if (Scenario == ScenarioStopInGapTarget)
+					SetTarget(limit + entrySide * OutOfReachPoints, utc);
 
-				RecordSubmit(entryName, action, OrderType.Limit, limit, utc);
-				Order placed = isLong ? EnterLongLimit(1, limit, entryName) : EnterShortLimit(1, limit, entryName);
-				if (placed != null)
-					entryOrder = placed;
+				RecordSubmit(entryName, string.Empty, action, OrderType.Limit, double.NaN, limit, utc);
+				Track(isLong ? EnterLongLimit(1, limit, entryName) : EnterShortLimit(1, limit, entryName));
 				return;
 			}
 
@@ -285,7 +383,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				: Close[0] + entrySide * OutOfReachPoints;
 			SetTarget(target, utc);
 
-			RecordSubmit(entryName, action, OrderType.Market, double.NaN, utc);
+			RecordSubmit(entryName, string.Empty, action, OrderType.Market, double.NaN, double.NaN, utc);
 			if (isLong)
 				EnterLong(1, entryName);
 			else
@@ -299,6 +397,40 @@ namespace NinjaTrader.NinjaScript.Strategies
 			return state == OrderState.Filled || state == OrderState.Cancelled || state == OrderState.Rejected;
 		}
 
+		/// <summary>Record each entry still working as stuck, cancel it unless that is already under
+		/// way, and stop waiting on them.</summary>
+		private void ReleaseStuckEntries()
+		{
+			// A cancel can call back into OnOrderUpdate before it returns, so the list is copied.
+			foreach (Order order in entryOrders.ToArray())
+			{
+				RecordEvent(Stuck, order, double.NaN, Time[0], ErrorCode.NoError, string.Empty);
+				if (!IsCancelling(order.OrderState))
+					CancelOrder(order);
+			}
+			entryOrders.Clear();
+		}
+
+		/// <summary>Wait on an entry order until it ends, once however often it is seen.</summary>
+		private void Track(Order order)
+		{
+			if (order != null && !entryOrders.Contains(order))
+				entryOrders.Add(order);
+		}
+
+		private bool IsTrialEntryName(string name)
+		{
+			for (int leg = 1; leg <= EntryLegs(); leg++)
+				if (name == LegName(leg))
+					return true;
+			return false;
+		}
+
+		private static bool IsCancelling(OrderState state)
+		{
+			return state == OrderState.CancelPending || state == OrderState.CancelSubmitted;
+		}
+
 		private void SetTarget(double price, DateTime utc)
 		{
 			SetProfitTarget(entryName, CalculationMode.Price, price);
@@ -307,8 +439,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private void SetStop(double price, DateTime utc)
 		{
-			SetStopLoss(entryName, CalculationMode.Price, price, false);
+			for (int leg = 1; leg <= EntryLegs(); leg++)
+				SetStopLoss(LegName(leg), CalculationMode.Price, price, false);
 			RecordStopSet(price, utc);
+		}
+
+		private int EntryLegs()
+		{
+			return Scenario == ScenarioFourStopEntries ? FourLegs : 1;
+		}
+
+		/// <summary>The trial's entry name for its first leg, and that name and the leg's number for
+		/// the others.</summary>
+		private string LegName(int leg)
+		{
+			return leg == 1 ? entryName : entryName + leg.ToString(CultureInfo.InvariantCulture);
 		}
 
 		private void ExitPosition(DateTime utc)
@@ -317,11 +462,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 
 			bool isLong = Position.MarketPosition == MarketPosition.Long;
-			RecordSubmit(ExitName, isLong ? OrderAction.Sell : OrderAction.BuyToCover, OrderType.Market, double.NaN, utc);
-			if (isLong)
-				ExitLong(ExitName, entryName);
-			else
-				ExitShort(ExitName, entryName);
+			// One exit for each leg still open. ExitLong(string) takes the entry to exit, not the
+			// exit's own name, and an exit naming an entry with no position is ignored.
+			for (int leg = 1; leg <= EntryLegs(); leg++)
+			{
+				string legName = LegName(leg);
+				if (!openLegs.Contains(legName))
+					continue;
+
+				RecordSubmit(ExitName, legName, isLong ? OrderAction.Sell : OrderAction.BuyToCover,
+					OrderType.Market, double.NaN, double.NaN, utc);
+				if (isLong)
+					ExitLong(ExitName, legName);
+				else
+					ExitShort(ExitName, legName);
+			}
 
 			exitSubmitted = true;
 		}
@@ -334,8 +489,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 			// The Enter methods return the order, but the callback can arrive before that
 			// assignment lands, so the reference is claimed by name here as well.
-			if (order.Name == entryName && entryOrder == null && !IsTerminalOrderState(orderState))
-				entryOrder = order;
+			if (IsTrialEntryName(order.Name) && !IsTerminalOrderState(orderState) && !IsCancelling(orderState))
+				Track(order);
 
 			RecordEvent(OrderUpdate, order, double.NaN, time, error, comment);
 		}
@@ -346,27 +501,40 @@ namespace NinjaTrader.NinjaScript.Strategies
 			if (eventRows == null || CurrentBar < 0 || execution.Order == null)
 				return;
 
-			RecordEvent(Execution, execution.Order, price, time, ErrorCode.NoError, executionId);
+			Order order = execution.Order;
+			if (IsTrialEntryName(order.Name))
+				openLegs.Add(order.Name);
+			else if (!string.IsNullOrEmpty(order.FromEntrySignal))
+				openLegs.Remove(order.FromEntrySignal);
+
+			RecordEvent(Execution, order, price, time, ErrorCode.NoError, executionId);
 		}
 
-		/// <summary>One row per order sent. limitPrice is NaN on a market order, which has none. No
-		/// order sent here has a stop price.</summary>
-		private void RecordSubmit(string signalName, OrderAction action, OrderType orderType, double limitPrice,
-			DateTime utc)
+		/// <summary>One row per order sent. A price is NaN on an order that has none: both on a market
+		/// order, the stop price on a limit and the limit price on a stop. <paramref name="fromEntry"/>
+		/// is the entry an exit names, and empty on an entry.</summary>
+		private void RecordSubmit(string signalName, string fromEntry, OrderAction action, OrderType orderType,
+			double stopPrice, double limitPrice, DateTime utc)
 		{
 			eventRows.Append(string.Format(CultureInfo.InvariantCulture,
-				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};;{7};{8};;{9};1;;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;;{10}\n",
+				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};;{7};{8};{9};{10};1;;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;;{11}\n",
 				Submit,
 				trial,
 				CurrentBar,
 				utc,
 				Time[0],
 				signalName,
-				signalName == ExitName ? entryName : string.Empty,
+				fromEntry,
 				action,
 				orderType,
-				double.IsNaN(limitPrice) ? string.Empty : limitPrice.ToString("R", CultureInfo.InvariantCulture),
+				PriceField(stopPrice),
+				PriceField(limitPrice),
 				Bars.IsLastBarOfSession ? 1 : 0));
+		}
+
+		private static string PriceField(double price)
+		{
+			return double.IsNaN(price) ? string.Empty : price.ToString("R", CultureInfo.InvariantCulture);
 		}
 
 		private void RecordTargetSet(double price, DateTime utc)
@@ -421,7 +589,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				order.Quantity,
 				order.Filled,
 				order.AverageFillPrice,
-				double.IsNaN(executionPrice) ? string.Empty : executionPrice.ToString("R", CultureInfo.InvariantCulture),
+				PriceField(executionPrice),
 				order.OrderState,
 				ToUtcUnordered(eventTime),
 				eventTime,
@@ -513,7 +681,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			int offsetTicks = Scenario == ScenarioEntryBar || Scenario == ScenarioMarketable
 				? PassedOffsetTicks
 				: GapOffsetTicks;
-			string stopPart = Scenario == ScenarioStopInGap
+			string stopPart = IsStopScenario()
 				? string.Format(CultureInfo.InvariantCulture, "_stop{0}", StopOffsetTicks)
 				: string.Empty;
 			string stem = string.Format(CultureInfo.InvariantCulture,
@@ -546,8 +714,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		#region Properties
 
 		[NinjaScriptProperty]
-		[Range(1, 5)]
-		[Display(Name = "Scenario (1 entry bar, 2 resting, 3 limit entry, 4 marketable entry, 5 stop in the gap)", Order = 1, GroupName = "Parameters")]
+		[Range(1, 9)]
+		[Display(Name = "Scenario (1 entry bar, 2 resting, 3 limit entry, 4 marketable entry, 5 stop in the gap, 6 stop entry, 7 stop entry with a target, 8 stop in the gap with a target, 9 four stop entries)", Order = 1, GroupName = "Parameters")]
 		public int Scenario { get; set; }
 
 		[NinjaScriptProperty]
