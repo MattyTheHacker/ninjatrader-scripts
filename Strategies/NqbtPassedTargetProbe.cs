@@ -187,9 +187,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			else if (State == State.Configure)
 			{
-				// AllEntries with four allowed, as both strategies run.
-				if (Scenario == ScenarioFourStopEntries)
-					EntriesPerDirection = FourLegs;
+				// AllEntries with four allowed, as both strategies run, and set every run, because an
+				// instance reused between runs keeps the last one's.
+				EntriesPerDirection = EntryLegs();
 			}
 			else if (State == State.DataLoaded)
 			{
