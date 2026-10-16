@@ -26,7 +26,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 	/// event stamp, and the order's IsLiveUntilCancelled read back off the order rather than
 	/// assumed from the overload that placed it.
 	///
-	/// Six scenarios, one per run, selected by Scenario:
+	/// Seven scenarios, one per run, selected by Scenario:
 	///
 	///   1  Lifetime          One unreachable LUC buy stop. Resubmitted only once the previous
 	///                        one reaches a terminal state, so the pattern of terminations is
@@ -63,6 +63,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 	///                        which tells "the second of the pair" from "the short side". If both
 	///                        rest, a bar through both triggers shows what the pair does when
 	///                        both levels trade -- the entry-side ambiguity rule nqbt lacks.
+	///   7  ExitAndEnter      A market long, then ExitLong() and a market entry submitted in the
+	///                        same OnBarUpdate while it is open (#404): EnterLong() on odd trials,
+	///                        EnterShort() on even ones. An ignored entry leaves a SUBMIT row with
+	///                        no ORDER_UPDATE, and the bar file's position on the bar the pair
+	///                        fills on tells a clean reversal (short 1) from a double close
+	///                        (short 2). Whatever the pair leaves open is flattened before the next
+	///                        trial. Neither a trial nor its pair is submitted on a session's last
+	///                        bar, so a trial whose long fills there has no pair. Run at
+	///                        MaxEntriesPerDirection 1 with TraceProbeOrders on, so the Output
+	///                        window carries NinjaTrader's reason for any order it ignores.
 	///
 	/// **Order callbacks report a bar index one behind the bar being processed.** Measured at
 	/// 535 fills out of 535: the bar an ORDER_UPDATE or EXECUTION row carries never reaches the
@@ -85,6 +95,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const int ScenarioSessionEdge = 4;
 		private const int ScenarioSessionCross = 5;
 		private const int ScenarioTwoSided = 6;
+		private const int ScenarioExitAndEnter = 7;
 
 		private const string EventHeader =
 			"kind;trial;bar;bar_utc;bar_local;is_first_bar_of_session;signal_name;submitted_luc;" +
@@ -114,14 +125,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private const string PrimaryName = "probe1";
 		private const string SecondaryName = "probe2";
 
+		/// <summary>NinjaTrader's own name for an ExitLong() order, so scenario 7's SUBMIT row joins its updates.</summary>
+		private const string ExitLongName = "Sell";
+
 		private StringBuilder eventRows;
 		private StringBuilder barRows;
 		private StringBuilder configRows;
 
-		/// <summary>The buy stop in every scenario.</summary>
+		/// <summary>The buy stop in scenarios 1 to 6, and scenario 7's market long.</summary>
 		private Order primary;
 
-		/// <summary>Scenario 2's plain three-argument control, scenario 3's and 6's sell stop.</summary>
+		/// <summary>Scenario 2's plain three-argument control, scenario 3's and 6's sell stop, and
+		/// scenario 7's second market entry.</summary>
 		private Order secondary;
 
 		private int trial;
@@ -131,6 +146,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 		private int positionOpenedBar = -1;
 		private bool cancelIssued;
 		private bool exitSubmitted;
+
+		/// <summary>Scenario 7: the trial's exit-and-entry pair has gone in.</summary>
+		private bool pairSubmitted;
 
 		/// <summary>NinjaTrader's *display* zone, which is what bar and event times are in.
 		/// Reading the trading-hours zone instead put every bar of an earlier export 5 hours
@@ -200,6 +218,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 				positionOpenedBar = -1;
 				cancelIssued = false;
 				exitSubmitted = false;
+				pairSubmitted = false;
 				previousBarUtc = DateTime.MinValue;
 				firstUtc = DateTime.MinValue;
 				lastUtc = DateTime.MinValue;
@@ -249,6 +268,15 @@ namespace NinjaTrader.NinjaScript.Strategies
 				if (positionOpenedBar < 0)
 					positionOpenedBar = CurrentBar;
 
+				// With IsExitOnSessionClose on, the session-close handler flattens at a session's
+				// last close, so a pair submitted there would not be the question being asked.
+				if (Scenario == ScenarioExitAndEnter && !pairSubmitted)
+				{
+					if (CurrentBar - positionOpenedBar >= HoldBars && !Bars.IsLastBarOfSession)
+						SubmitExitAndEnter(utc);
+					return;
+				}
+
 				// At HoldBars 0 the position leaves at the first opportunity, which is what
 				// scenarios 1 to 3 were measured under. Above that it is carried, so that the
 				// session-close handler is what ends it rather than the probe.
@@ -259,6 +287,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 			}
 			exitSubmitted = false;
 			positionOpenedBar = -1;
+			pairSubmitted = false;
 
 			if (Scenario == ScenarioCancelTiming && ShouldCancelNow())
 			{
@@ -290,6 +319,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			// cancel is a two-bar cycle and a session is a constant 1,380 bars, so the parity
 			// is fixed and the close bar was a resting bar every time.
 			if (Scenario == ScenarioSessionCross && !Bars.IsLastBarOfSession)
+				return;
+
+			if (Scenario == ScenarioExitAndEnter && Bars.IsLastBarOfSession)
 				return;
 
 			SubmitTrial(utc);
@@ -360,12 +392,32 @@ namespace NinjaTrader.NinjaScript.Strategies
 				return;
 			}
 
+			if (Scenario == ScenarioExitAndEnter)
+			{
+				RecordMarketSubmit(PrimaryName, OrderAction.Buy, utc);
+				primary = EnterLong(1, PrimaryName);
+				return;
+			}
+
 			double above = High[0] + offset;
 			double below = Low[0] - offset;
 			RecordSubmit(PrimaryName, true, OrderAction.Buy, above, utc);
 			primary = EnterLongStopMarket(0, true, 1, above, PrimaryName);
 			RecordSubmit(SecondaryName, true, OrderAction.SellShort, below, utc);
 			secondary = EnterShortStopMarket(0, true, 1, below, SecondaryName);
+		}
+
+		/// <summary>Submit scenario 7's pair: ExitLong(), then the same side on an odd trial and the other on an even one.</summary>
+		private void SubmitExitAndEnter(DateTime utc)
+		{
+			pairSubmitted = true;
+
+			RecordMarketSubmit(ExitLongName, OrderAction.Sell, utc);
+			ExitLong();
+
+			bool sameSide = trial % 2 == 1;
+			RecordMarketSubmit(SecondaryName, sameSide ? OrderAction.Buy : OrderAction.SellShort, utc);
+			secondary = sameSide ? EnterLong(1, SecondaryName) : EnterShort(1, SecondaryName);
 		}
 
 		/// <summary>Scenario 6's plain pair at the window's extremes, in the order SubmitShortFirst sets.</summary>
@@ -461,8 +513,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
 		private void RecordSubmit(string signalName, bool luc, OrderAction action, double stopPrice, DateTime utc)
 		{
+			RecordSubmit(signalName, luc, action, OrderType.StopMarket, stopPrice, utc);
+		}
+
+		/// <summary>Record a plain market order's submission, whose stop price column is left empty.</summary>
+		private void RecordMarketSubmit(string signalName, OrderAction action, DateTime utc)
+		{
+			RecordSubmit(signalName, false, action, OrderType.Market, string.Empty, utc);
+		}
+
+		private void RecordSubmit(string signalName, bool luc, OrderAction action, OrderType orderType,
+			object stopPrice, DateTime utc)
+		{
 			eventRows.Append(string.Format(CultureInfo.InvariantCulture,
-				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};{7};;;{8};StopMarket;{9};;1;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;{10}\n",
+				"{0};{1};{2};{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};{5};{6};{7};;;{8};{11};{9};;1;;;;{3:yyyyMMdd HHmmss};{4:yyyyMMdd HHmmss};;;{10}\n",
 				Submit,
 				trial,
 				CurrentBar,
@@ -473,7 +537,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 				luc ? 1 : 0,
 				action,
 				stopPrice,
-				Bars.IsLastBarOfSession ? 1 : 0));
+				Bars.IsLastBarOfSession ? 1 : 0,
+				orderType));
 		}
 
 		private void RecordEvent(string kind, Order order, string signalName, bool luc, DateTime eventTime)
@@ -644,8 +709,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 		#region Properties
 
 		[NinjaScriptProperty]
-		[Range(1, 6)]
-		[Display(Name = "Scenario (1 lifetime, 2 cancel, 3 opposite, 4 session edge, 5 session cross, 6 two-sided)", Order = 1, GroupName = "Parameters")]
+		[Range(1, 7)]
+		[Display(Name = "Scenario (1 lifetime, 2 cancel, 3 opposite, 4 session edge, 5 session cross, 6 two-sided, 7 exit and enter)", Order = 1, GroupName = "Parameters")]
 		public int Scenario { get; set; }
 
 		[NinjaScriptProperty]
